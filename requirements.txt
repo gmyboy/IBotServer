@@ -1,0 +1,10 @@
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.5
+PyYAML>=6.0
+httpx>=0.27
+
+# 语音 STT/TTS（speech.enabled=true 时需要）
+dashscope>=1.20.0
+# cryptography 49+ 在部分 macOS 上与系统 OpenSSL 不兼容，会导致 dashscope 无法 import
+cryptography>=42,<44

@@ -1,0 +1,54 @@
+# ---- Python ----
+backend/__pycache__/
+__pycache__/
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+*.egg
+
+memory.db
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+*.local
+config.yaml
+
+# ---- Databases / data ----
+*.db
+*.sqlite
+*.sqlite3
+data/
+models/
+
+# ---- Logs ----
+*.log
+logs/
+
+# ---- Caches / test ----
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.cache/
+.coverage
+htmlcov/
+
+# ---- IDE / editor ----
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ---- OS ----
+.DS_Store
+Thumbs.db
+desktop.ini

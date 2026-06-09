@@ -1,0 +1,6 @@
+# Speech deps — install from official PyPI:
+#   pip install -r requirements-speech.txt -i https://pypi.org/simple
+#
+# STT/TTS 均走阿里云 DashScope 在线 API；TTS 需 dashscope>=1.20（含 tts_v2 WebSocket）
+
+dashscope>=1.20.0

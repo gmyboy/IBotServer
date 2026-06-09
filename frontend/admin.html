@@ -1,0 +1,913 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Pophie 管理后台</title>
+<style>
+  :root{
+    --bg:#0f1220; --panel:#181b2e; --panel2:#22263d;
+    --text:#e7e9f5; --muted:#9aa0c0; --accent:#7aa2ff;
+    --l1:#9aa0c0; --l2:#5dd0c1; --l3:#f0b454; --l4:#ef6f8a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"Segoe UI","PingFang SC",sans-serif;
+       background:var(--bg);color:var(--text);height:100vh;overflow:hidden}
+  header{padding:14px 18px;border-bottom:1px solid #2a2f4a;
+         display:flex;align-items:center;gap:12px;background:var(--panel)}
+  header h1{margin:0;font-size:16px;font-weight:600}
+  header .meta{margin-left:auto;color:var(--muted);font-size:12px;display:flex;gap:10px;align-items:center}
+  header a{color:var(--accent);text-decoration:none;font-size:12px}
+  header button{background:#2a2f4a;color:var(--text);border:0;
+                padding:5px 12px;border-radius:6px;cursor:pointer;font-size:12px}
+  header button:disabled{opacity:.5;cursor:not-allowed}
+  header button.speech-on{background:#2d6a4f;color:#e7f5ef}
+  header button.speech-off{background:#5c3d3d;color:#f5e7e7}
+  header button.btn-restart{background:#3d4f7a;color:#e7e9f5}
+  header select{background:#2a2f4a;color:var(--text);border:1px solid #3a4060;
+                padding:5px 8px;border-radius:6px;font-size:12px;max-width:180px}
+  .layout{display:grid;grid-template-columns:280px 1fr;height:calc(100vh - 49px)}
+  .content-area{display:flex;flex-direction:column;overflow:hidden;min-height:0}
+  .sidebar{border-right:1px solid #2a2f4a;background:var(--panel);
+           display:flex;flex-direction:column;overflow:hidden;min-height:0}
+  .sidebar .search{padding:10px 12px;border-bottom:1px solid #2a2f4a;flex-shrink:0}
+  .sidebar .search input{width:100%;background:var(--panel2);border:1px solid #2a2f4a;
+                         color:var(--text);border-radius:8px;padding:7px 10px;font-size:13px}
+  #robot-sidebar{display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden}
+  .robot-list{flex:1;min-height:0;overflow-y:auto;padding:8px}
+  .robot-item{padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:4px;
+              border:1px solid transparent}
+  .robot-item:hover{background:var(--panel2)}
+  .robot-item.active{background:var(--panel2);border-color:var(--accent)}
+  .robot-item .rid{font-size:13px;font-weight:600;word-break:break-all}
+  .robot-item .sub{font-size:11px;color:var(--muted);margin-top:4px}
+  .main{display:flex;flex-direction:column;overflow:hidden;min-height:0}
+  .detail-header{padding:14px 18px;border-bottom:1px solid #2a2f4a;background:var(--panel)}
+  .detail-header .row{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
+  .detail-header .rid{font-size:14px;font-weight:600;word-break:break-all}
+  .detail-header .stats{font-size:12px;color:var(--muted)}
+  .detail-header input{background:var(--panel2);border:1px solid #2a2f4a;color:var(--text);
+                       border-radius:6px;padding:5px 8px;font-size:12px;min-width:160px}
+  .detail-header .actions{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .btn-warn{background:#f0b454;color:#0b0e1a;border:0;padding:4px 10px;
+            border-radius:6px;cursor:pointer;font-size:11px}
+  .btn-danger{background:#ef6f8a;color:#0b0e1a;border:0;padding:4px 10px;
+              border-radius:6px;cursor:pointer;font-size:11px}
+  .btn-ghost{background:#2a2f4a;color:var(--text);border:0;padding:4px 10px;
+             border-radius:6px;cursor:pointer;font-size:11px}
+  .tabs{display:flex;border-bottom:1px solid #2a2f4a;background:var(--panel)}
+  .tab{padding:10px 14px;cursor:pointer;color:var(--muted);font-size:13px;
+       border-bottom:2px solid transparent}
+  .tab.active{color:var(--text);border-bottom-color:var(--accent)}
+  .pane{flex:1;overflow-y:auto;padding:12px 14px;display:none}
+  .pane.active{display:block}
+  .empty{color:var(--muted);font-size:13px;padding:20px;text-align:center}
+  .layer-section{margin-bottom:14px}
+  .layer-title{display:flex;align-items:center;gap:8px;font-size:12px;
+               color:var(--muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.05em}
+  .layer-title .badge{padding:1px 8px;border-radius:10px;color:#0b0e1a;
+                      font-weight:700;font-size:11px}
+  .badge.L1{background:var(--l1)} .badge.L2{background:var(--l2)}
+  .badge.L3{background:var(--l3)} .badge.L4{background:var(--l4)}
+  .mem-card{background:var(--panel);border:1px solid #2a2f4a;
+            border-radius:10px;padding:9px 11px;margin-bottom:6px;font-size:13px}
+  .mem-card .top{display:flex;gap:6px;align-items:center;margin-bottom:4px;flex-wrap:wrap}
+  .mem-card .top .id{color:var(--muted);font-size:11px}
+  .mem-card .top .imp{margin-left:auto;font-size:11px;color:var(--muted)}
+  .mem-card .summary{font-size:13px;line-height:1.45;white-space:pre-wrap;word-break:break-word}
+  .mem-card .tags{margin-top:4px}
+  .tag{display:inline-block;font-size:10px;background:#2a2f4a;
+       padding:1px 6px;border-radius:8px;margin-right:4px;color:var(--muted)}
+  .flow{margin-top:6px;display:flex;align-items:center;gap:4px;
+        font-size:11px;color:var(--muted);flex-wrap:wrap}
+  .flow .step{padding:1px 6px;border-radius:6px;color:#0b0e1a;font-weight:700}
+  .flow .arrow{color:var(--muted)}
+  .flow .reason{color:var(--muted);font-style:italic;margin-right:3px}
+  .msg-row{padding:8px 10px;border-bottom:1px solid #2a2f4a;font-size:13px}
+  .msg-row .meta{font-size:11px;color:var(--muted);margin-bottom:3px}
+  .msg-row.user .role{color:var(--accent)}
+  .msg-row.assistant .role{color:var(--l2)}
+  .msg-row.proactive .role{color:#b48cff}
+  .del-btn{background:#ef6f8a;color:#0b0e1a;border:0;padding:2px 8px;
+           border-radius:6px;cursor:pointer;font-size:11px;margin-left:auto}
+  #token-mask{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;
+              align-items:center;justify-content:center;z-index:100}
+  #token-mask.show{display:flex}
+  #token-dialog{background:var(--panel);border:1px solid #2a2f4a;border-radius:12px;
+                padding:20px;width:min(400px,90vw)}
+  #token-dialog h3{margin:0 0 12px;font-size:15px}
+  #token-dialog input{width:100%;background:var(--panel2);border:1px solid #2a2f4a;
+                      color:var(--text);border-radius:8px;padding:8px 10px;font-size:13px}
+  #token-dialog .row{margin-top:12px;display:flex;gap:8px;justify-content:flex-end}
+  #status-bar{font-size:11px;color:var(--muted);padding:6px 12px;border-top:1px solid #2a2f4a}
+  .sidebar-nav{display:flex;border-bottom:1px solid #2a2f4a;flex-shrink:0}
+  .sidebar-nav button{flex:1;background:transparent;border:0;color:var(--muted);
+                     padding:10px 8px;font-size:12px;cursor:pointer}
+  .sidebar-nav button.active{color:var(--text);background:var(--panel2);
+                              box-shadow:inset 0 -2px 0 var(--accent)}
+  .config-wrap{flex:1;padding:16px 18px;overflow-y:auto;min-height:0}
+  .config-section{background:var(--panel);border:1px solid #2a2f4a;border-radius:10px;
+                  padding:14px 16px;margin-bottom:14px}
+  .config-section h3{margin:0 0 12px;font-size:14px}
+  .cfg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:10px 14px}
+  .cfg-field{display:flex;flex-direction:column;gap:4px}
+  .cfg-field label{font-size:11px;color:var(--muted)}
+  .cfg-field input,.cfg-field select{background:var(--panel2);border:1px solid #2a2f4a;
+                                    color:var(--text);border-radius:6px;padding:6px 8px;font-size:13px}
+  .cfg-field .hint{font-size:10px;color:#7782a8}
+  .config-actions{display:flex;gap:8px;margin-bottom:14px;align-items:center;flex-wrap:wrap}
+  .config-note{font-size:12px;color:var(--muted)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Pophie 管理后台</h1>
+  <div class="meta">
+    <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)">
+      音色
+      <select id="header-voice" title="切换默认 TTS 音色（立即生效）">
+        <option value="">加载中…</option>
+      </select>
+    </label>
+    <button type="button" id="btn-speech-toggle" class="speech-on" title="开启/关闭语音 STT/TTS">语音：…</button>
+    <button type="button" id="btn-restart" class="btn-restart" title="重新启动后端进程">重启服务</button>
+    <a href="/">← 返回聊天</a>
+    <button type="button" id="btn-refresh">刷新</button>
+    <button type="button" id="btn-token">设置 Token</button>
+  </div>
+</header>
+<div class="layout">
+  <aside class="sidebar">
+    <div class="sidebar-nav">
+      <button type="button" class="active" data-mode="robots">机器人</button>
+      <button type="button" data-mode="config">系统配置</button>
+    </div>
+    <div id="robot-sidebar">
+      <div class="search">
+        <input type="text" id="search" name="pophie-admin-robot-filter"
+               placeholder="搜索 robot_id / 备注名…"
+               autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+               data-lpignore="true" data-1p-ignore="true" data-form-type="other" />
+      </div>
+      <div class="robot-list" id="robot-list"></div>
+    </div>
+  </aside>
+  <div class="content-area">
+  <main class="main" id="robot-main">
+    <div class="detail-header" id="detail-header">
+      <div class="empty">请从左侧选择一个机器人</div>
+    </div>
+    <div class="tabs" id="tabs" style="display:none">
+      <div class="tab active" data-pane="memories">记忆</div>
+      <div class="tab" data-pane="conversations">对话</div>
+      <div class="tab" data-pane="reminders">提醒</div>
+      <div class="tab" data-pane="proactive-log">主动日志</div>
+    </div>
+    <div class="pane active" id="pane-memories"></div>
+    <div class="pane" id="pane-conversations"></div>
+    <div class="pane" id="pane-reminders"></div>
+    <div class="pane" id="pane-proactive-log"></div>
+    <div id="status-bar"></div>
+  </main>
+  <main class="main" id="config-main" style="display:none">
+    <div class="config-wrap">
+      <div class="config-actions">
+        <button type="button" class="btn-warn" id="btn-save-config">保存配置</button>
+        <button type="button" class="btn-ghost" id="btn-reload-config">重新加载</button>
+        <span class="config-note" id="config-path"></span>
+      </div>
+      <div id="config-form"></div>
+      <p class="config-note">修改 LLM / 记忆 / 聊天 / 语音参数后立即生效；修改 host / port 需重启服务。</p>
+    </div>
+    <div id="config-status-bar" class="config-note" style="padding:6px 12px;border-top:1px solid #2a2f4a"></div>
+  </main>
+  </div>
+</div>
+
+<div id="token-mask">
+  <div id="token-dialog">
+    <h3>Admin Token</h3>
+    <p style="font-size:12px;color:var(--muted);margin:0 0 10px">
+      若服务端配置了 admin_token，请在此输入。留空表示无鉴权。
+    </p>
+    <input type="password" id="token-input" placeholder="X-Admin-Token" />
+    <div class="row">
+      <button type="button" class="btn-ghost" id="token-cancel">取消</button>
+      <button type="button" class="btn-warn" id="token-save">保存</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const API = "";
+const LS_TOKEN = "pophie_admin_token";
+let selectedRobot = null;
+let searchTimer = null;
+let adminMode = "robots";
+let configData = {};
+let configSchema = [];
+let ttsVoices = [];
+let voiceSaving = false;
+let serviceInfo = {speech_config_enabled: true, speech_runtime: true};
+
+function $(id){ return document.getElementById(id); }
+function el(tag, cls, html){
+  const e = document.createElement(tag);
+  if(cls) e.className = cls;
+  if(html !== undefined) e.innerHTML = html;
+  return e;
+}
+function escapeHtml(s){
+  return (s||"").replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+}
+function setStatus(msg){ $("status-bar").textContent = msg || ""; }
+function setConfigStatus(msg){ $("config-status-bar").textContent = msg || ""; }
+
+function getNested(obj, path){
+  let cur = obj;
+  for(const key of path){
+    if(cur == null || typeof cur !== "object") return undefined;
+    cur = cur[key];
+  }
+  return cur;
+}
+
+function setNested(obj, path, value){
+  let cur = obj;
+  for(let i = 0; i < path.length - 1; i++){
+    const key = path[i];
+    if(!cur[key] || typeof cur[key] !== "object") cur[key] = {};
+    cur = cur[key];
+  }
+  cur[path[path.length - 1]] = value;
+}
+
+function fieldId(section, path){
+  return "cfg-" + section + "-" + path.join("-");
+}
+
+function syncSpeechToggle(){
+  const btn = $("btn-speech-toggle");
+  if(!btn) return;
+  const on = !!serviceInfo.speech_config_enabled;
+  btn.textContent = on ? "语音：开" : "语音：关";
+  btn.classList.toggle("speech-on", on);
+  btn.classList.toggle("speech-off", !on);
+  const runtime = serviceInfo.speech_runtime;
+  btn.title = on
+    ? (runtime ? "语音已开启（STT/TTS 可用），点击关闭" : "配置已开启但运行时不可用（检查 API Key / dashscope），点击关闭")
+    : "语音已关闭，点击开启";
+}
+
+async function loadServiceInfo(){
+  try{
+    serviceInfo = await api("/api/admin/service");
+    syncSpeechToggle();
+  }catch(e){
+    try{
+      const h = await apiRobot("/api/health");
+      serviceInfo = {
+        speech_config_enabled: !!h.speech_enabled,
+        speech_runtime: !!h.speech_enabled,
+      };
+      syncSpeechToggle();
+    }catch(_){
+      $("btn-speech-toggle").textContent = "语音：?";
+    }
+  }
+}
+
+async function toggleSpeech(){
+  const btn = $("btn-speech-toggle");
+  const next = !serviceInfo.speech_config_enabled;
+  const label = next ? "开启" : "关闭";
+  if(!confirm(`确定${label}语音功能（STT/TTS）？`)) return;
+  btn.disabled = true;
+  try{
+    const r = await api("/api/admin/service", "PUT", {speech_enabled: next});
+    serviceInfo.speech_config_enabled = r.speech_config_enabled;
+    serviceInfo.speech_runtime = r.speech_runtime;
+    if(!configData.speech) configData.speech = {};
+    configData.speech.enabled = r.speech_config_enabled;
+    syncSpeechToggle();
+    const msg = `语音已${label}` + (next && !r.speech_runtime ? "（运行时不可用，请检查 API Key）" : "");
+    setStatus(msg);
+    setConfigStatus(msg);
+    if(adminMode === "config") renderConfigForm();
+  }catch(e){
+    alert(e.message);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+async function restartService(){
+  if(!confirm("确定要重启后端服务？所有连接将短暂中断。")) return;
+  const btn = $("btn-restart");
+  btn.disabled = true;
+  setStatus("正在重启服务…");
+  try{
+    await api("/api/admin/service/restart", "POST");
+  }catch(e){
+    // 连接断开时 fetch 可能失败，仍继续轮询
+    if(!String(e.message).includes("Failed to fetch") && !String(e.message).includes("NetworkError")){
+      alert(e.message);
+      btn.disabled = false;
+      return;
+    }
+  }
+  let tries = 0;
+  const poll = setInterval(async () => {
+    tries++;
+    try{
+      await apiRobot("/api/health");
+      clearInterval(poll);
+      setStatus("服务已重启");
+      btn.disabled = false;
+      await Promise.all([loadServiceInfo(), loadVoiceCatalog(), loadRobots()]);
+    }catch(_){
+      if(tries >= 40){
+        clearInterval(poll);
+        setStatus("重启超时，请手动刷新页面或检查终端");
+        btn.disabled = false;
+      }
+    }
+  }, 1000);
+}
+
+function voiceLabel(voiceId){
+  const v = ttsVoices.find(x => x.id === voiceId);
+  return v ? v.label : voiceId;
+}
+
+function fillVoiceOptions(select, selectedId){
+  if(!ttsVoices.length){
+    select.innerHTML = '<option value="">暂无音色</option>';
+    return;
+  }
+  select.innerHTML = ttsVoices.map(v => {
+    const tag = v.instruct ? " ★" : "";
+    const def = v.default ? "（默认）" : "";
+    const sel = v.id === selectedId ? " selected" : "";
+    return `<option value="${escapeHtml(v.id)}"${sel}>${escapeHtml(v.label)}${def}${tag}</option>`;
+  }).join("");
+  if(selectedId && ttsVoices.some(v => v.id === selectedId)){
+    select.value = selectedId;
+  }else{
+    const fallback = ttsVoices.find(v => v.default)?.id || ttsVoices[0].id;
+    select.value = fallback;
+  }
+}
+
+function currentDefaultVoice(){
+  return getNested(configData.speech, ["tts", "default_voice"])
+    || ttsVoices.find(v => v.default)?.id
+    || "";
+}
+
+function syncVoiceSelects(){
+  const vid = currentDefaultVoice();
+  fillVoiceOptions($("header-voice"), vid);
+  const cfgSel = $("cfg-speech-tts-default_voice");
+  if(cfgSel) fillVoiceOptions(cfgSel, vid);
+}
+
+async function applyVoiceImmediate(voiceId, source){
+  if(!voiceId || voiceSaving) return;
+  if(voiceId === currentDefaultVoice()) return;
+  voiceSaving = true;
+  try{
+    const r = await api("/api/admin/config", "PUT", {
+      config: {speech: {tts: {default_voice: voiceId}}},
+    });
+    configData = r.config || configData;
+    ttsVoices = r.tts_voices || ttsVoices;
+    syncVoiceSelects();
+    const msg = `默认音色已切换为「${voiceLabel(voiceId)}」`;
+    if(source === "header") setStatus(msg);
+    else setConfigStatus(msg);
+  }catch(e){
+    syncVoiceSelects();
+    alert(e.message);
+  }finally{
+    voiceSaving = false;
+  }
+}
+
+function renderConfigForm(){
+  const wrap = $("config-form");
+  wrap.innerHTML = "";
+  configSchema.forEach(sec => {
+    const section = el("div", "config-section");
+    section.appendChild(el("h3", "", escapeHtml(sec.title)));
+    const grid = el("div", "cfg-grid");
+    (sec.fields || []).forEach(field => {
+      const fid = fieldId(sec.section, field.path);
+      const val = getNested(configData[sec.section], field.path);
+      const box = el("div", "cfg-field");
+      const label = el("label");
+      label.setAttribute("for", fid);
+      label.textContent = field.label;
+      box.appendChild(label);
+
+      let input;
+      if(field.type === "boolean"){
+        input = el("select");
+        input.id = fid;
+        const boolVal = val === true;
+        [["true","是"],["false","否"]].forEach(([v, t]) => {
+          const opt = el("option");
+          opt.value = v;
+          opt.textContent = t;
+          opt.selected = (v === "true") === boolVal;
+          input.appendChild(opt);
+        });
+      }else if(field.type === "select"){
+        input = el("select");
+        input.id = fid;
+        (field.options || []).forEach(optVal => {
+          const opt = el("option");
+          opt.value = optVal;
+          opt.textContent = optVal;
+          if(String(val) === String(optVal)) opt.selected = true;
+          input.appendChild(opt);
+        });
+      }else if(field.type === "voice_select"){
+        input = el("select");
+        input.id = fid;
+        fillVoiceOptions(input, val == null ? "" : String(val));
+        input.addEventListener("change", () => {
+          applyVoiceImmediate(input.value, "config");
+        });
+      }else{
+        input = el("input");
+        input.id = fid;
+        input.type = field.type === "secret" ? "password" : (field.type === "number" ? "number" : "text");
+        if(field.step) input.step = field.step;
+        input.value = val == null ? "" : String(val);
+      }
+      input.dataset.section = sec.section;
+      input.dataset.path = field.path.join(".");
+      input.dataset.type = field.type;
+      box.appendChild(input);
+      if(field.hint) box.appendChild(el("span", "hint", escapeHtml(field.hint)));
+      grid.appendChild(box);
+    });
+    section.appendChild(grid);
+    wrap.appendChild(section);
+  });
+}
+
+function collectConfigFromForm(){
+  const next = JSON.parse(JSON.stringify(configData));
+  document.querySelectorAll("#config-form [data-section]").forEach(input => {
+    const section = input.dataset.section;
+    const path = input.dataset.path.split(".");
+    const type = input.dataset.type;
+    let value;
+    if(type === "boolean"){
+      value = input.value === "true";
+    }else if(type === "number"){
+      value = input.value === "" ? null : Number(input.value);
+    }else{
+      value = input.value;
+    }
+    if(!next[section]) next[section] = {};
+    setNested(next[section], path, value);
+  });
+  return next;
+}
+
+async function loadConfig(){
+  const data = await api("/api/admin/config");
+  configData = data.config || {};
+  configSchema = data.schema || [];
+  ttsVoices = data.tts_voices || [];
+  $("config-path").textContent = data.config_path ? `文件：${data.config_path}` : "";
+  renderConfigForm();
+  syncVoiceSelects();
+  setConfigStatus("配置已加载");
+}
+
+async function saveConfig(){
+  if(!confirm("保存配置到 config.yaml？部分参数将立即生效。")) return;
+  try{
+    const payload = collectConfigFromForm();
+    const r = await api("/api/admin/config", "PUT", {config: payload});
+    configData = r.config || payload;
+    ttsVoices = r.tts_voices || ttsVoices;
+    renderConfigForm();
+    syncVoiceSelects();
+    setConfigStatus("配置已保存");
+  }catch(e){ alert(e.message); }
+}
+
+function switchMode(mode){
+  adminMode = mode;
+  document.querySelectorAll(".sidebar-nav button").forEach(b => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+  });
+  $("robot-sidebar").style.display = mode === "robots" ? "" : "none";
+  $("robot-main").style.display = mode === "robots" ? "" : "none";
+  $("config-main").style.display = mode === "config" ? "" : "none";
+  if(mode === "config") loadConfig().catch(e => {
+    $("config-form").innerHTML = `<div class="empty">加载失败：${escapeHtml(e.message)}</div>`;
+  });
+}
+
+function adminHeaders(){
+  const h = {"Content-Type":"application/json"};
+  const t = sessionStorage.getItem(LS_TOKEN);
+  if(t) h["X-Admin-Token"] = t;
+  return h;
+}
+
+async function api(path, method="GET", body){
+  const r = await fetch(API + path, {
+    method, headers: adminHeaders(),
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if(!r.ok){
+    const txt = await r.text();
+    throw new Error(r.status + ": " + txt);
+  }
+  if(r.status === 204) return null;
+  return r.json();
+}
+
+async function apiRobot(path, method="GET", body){
+  const r = await fetch(API + path, {
+    method, headers: {"Content-Type":"application/json"},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if(!r.ok) throw new Error(await r.text());
+  return r.json();
+}
+
+function flowEl(flow){
+  const f = el("div", "flow");
+  (flow||[]).forEach((step, i) => {
+    if(i > 0) f.appendChild(el("span", "arrow", "→"));
+    if(step.reason && i > 0)
+      f.appendChild(el("span", "reason", `(${escapeHtml(step.reason)})`));
+    f.appendChild(el("span", "step badge " + step.layer, escapeHtml(step.layer)));
+  });
+  return f;
+}
+
+function memCard(m, withDelete){
+  const c = el("div", "mem-card");
+  const top = el("div", "top");
+  top.appendChild(el("span", "badge " + m.layer, m.layer));
+  top.appendChild(el("span", "id", "#" + m.id));
+  if(withDelete){
+    const btn = el("button", "del-btn", "删除");
+    btn.addEventListener("click", async () => {
+      if(!confirm(`删除记忆 #${m.id}？`)) return;
+      try{
+        await api(`/api/admin/memories/${m.id}?robot_id=${encodeURIComponent(selectedRobot)}`, "DELETE");
+        refreshMemories();
+        setStatus(`已删除记忆 #${m.id}`);
+      }catch(e){ alert(e.message); }
+    });
+    top.appendChild(btn);
+  }
+  top.appendChild(el("span", "imp",
+    `重要 ${Number(m.importance||0).toFixed(2)} · 印证 ${m.repetition_count||0} · 情感 ${Number(m.emotion_score||0).toFixed(2)}`));
+  c.appendChild(top);
+  c.appendChild(el("div", "summary", escapeHtml(m.summary || m.content)));
+  if(m.tags && m.tags.length){
+    const t = el("div", "tags");
+    m.tags.forEach(tag => t.appendChild(el("span","tag", escapeHtml(tag))));
+    c.appendChild(t);
+  }
+  if(m.flow_path && m.flow_path.length) c.appendChild(flowEl(m.flow_path));
+  return c;
+}
+
+async function loadRobots(){
+  const q = $("search").value.trim();
+  const path = q ? `/api/admin/robots?q=${encodeURIComponent(q)}` : "/api/admin/robots";
+  const data = await api(path);
+  const list = $("robot-list");
+  list.innerHTML = "";
+  if(!data.items.length){
+    list.appendChild(el("div","empty","暂无机器人"));
+    return;
+  }
+  data.items.forEach(r => {
+    const item = el("div", "robot-item" + (selectedRobot === r.robot_id ? " active" : ""));
+    const name = r.display_name ? ` · ${escapeHtml(r.display_name)}` : "";
+    item.innerHTML = `<div class="rid">${escapeHtml(r.robot_id)}${name}</div>
+      <div class="sub">记忆 ${r.memories_count||0} · 对话 ${r.conversations_count||0}
+        · 待提醒 ${r.reminders_pending||0}
+        ${r.last_seen_at ? " · " + escapeHtml(r.last_seen_at) : ""}</div>`;
+    item.addEventListener("click", () => selectRobot(r.robot_id));
+    list.appendChild(item);
+  });
+}
+
+async function selectRobot(robotId){
+  selectedRobot = robotId;
+  await loadRobots();
+  $("tabs").style.display = "flex";
+  await renderDetailHeader();
+  const active = document.querySelector(".tab.active");
+  if(active) refreshPane(active.dataset.pane);
+}
+
+async function renderDetailHeader(){
+  const hdr = $("detail-header");
+  if(!selectedRobot){
+    hdr.innerHTML = '<div class="empty">请从左侧选择一个机器人</div>';
+    $("tabs").style.display = "none";
+    return;
+  }
+  let detail;
+  try{
+    detail = await api(`/api/admin/robots/${encodeURIComponent(selectedRobot)}`);
+  }catch(e){
+    hdr.innerHTML = `<div class="empty">加载失败：${escapeHtml(e.message)}</div>`;
+    return;
+  }
+  const lc = detail.layer_counts || {};
+  hdr.innerHTML = `
+    <div class="row">
+      <span class="rid">${escapeHtml(detail.robot_id)}</span>
+      <span class="stats">
+        记忆 ${detail.memories_count||0}（L2 ${lc.L2||0} / L3 ${lc.L3||0} / L4 ${lc.L4||0}）
+        · 对话 ${detail.conversations_count||0} · 会话 ${detail.session_count||0}
+        · 待提醒 ${detail.reminders_pending||0}
+        ${detail.last_seen_at ? " · 最后活跃 " + escapeHtml(detail.last_seen_at) : ""}
+      </span>
+    </div>
+    <div class="row">
+      <label style="font-size:12px;color:var(--muted)">备注名</label>
+      <input type="text" id="display-name" value="${escapeHtml(detail.display_name||"")}" placeholder="可选备注" />
+      <button type="button" class="btn-ghost" id="btn-save-name">保存备注</button>
+    </div>
+    <div class="actions">
+      <button type="button" class="btn-warn" data-wipe="memories">清空记忆</button>
+      <button type="button" class="btn-warn" data-wipe="conversations">清空对话</button>
+      <button type="button" class="btn-warn" data-wipe="reminders">清空提醒</button>
+      <button type="button" class="btn-danger" data-wipe="all">清空全部数据</button>
+      <button type="button" class="btn-danger" id="btn-delete-robot">彻底删除机器人</button>
+    </div>`;
+
+  $("btn-save-name").addEventListener("click", async () => {
+    const name = $("display-name").value.trim();
+    try{
+      await api(`/api/admin/robots/${encodeURIComponent(selectedRobot)}`, "PATCH", {display_name: name});
+      setStatus("备注已保存");
+      loadRobots();
+    }catch(e){ alert(e.message); }
+  });
+
+  hdr.querySelectorAll("button[data-wipe]").forEach(b => {
+    b.addEventListener("click", () => wipeScope(b.dataset.wipe));
+  });
+  $("btn-delete-robot").addEventListener("click", deleteRobot);
+}
+
+async function wipeScope(scope){
+  const labels = {memories:"全部记忆", conversations:"对话历史", reminders:"所有提醒", all:"一切数据"};
+  if(!confirm(`确定擦除当前机器人的${labels[scope]}？`)) return;
+  try{
+    const r = await api("/api/admin/wipe", "POST", {scope, robot_id: selectedRobot});
+    setStatus("已擦除：" + JSON.stringify(r.deleted));
+    await renderDetailHeader();
+    const active = document.querySelector(".tab.active");
+    if(active) refreshPane(active.dataset.pane);
+    loadRobots();
+  }catch(e){ alert(e.message); }
+}
+
+async function deleteRobot(){
+  if(!confirm(`彻底删除机器人 ${selectedRobot} 及其全部数据？此操作不可恢复。`)) return;
+  try{
+    await api(`/api/admin/robots/${encodeURIComponent(selectedRobot)}`, "DELETE");
+    selectedRobot = null;
+    $("detail-header").innerHTML = '<div class="empty">请从左侧选择一个机器人</div>';
+    $("tabs").style.display = "none";
+    ["memories","conversations","reminders","proactive-log"].forEach(id => {
+      $(`pane-${id}`).innerHTML = "";
+    });
+    setStatus("机器人已删除");
+    loadRobots();
+  }catch(e){ alert(e.message); }
+}
+
+async function refreshMemories(){
+  const pane = $("pane-memories");
+  pane.innerHTML = "";
+  if(!selectedRobot) return;
+  const [allR, l1R] = await Promise.all([
+    apiRobot(`/api/memories?robot_id=${encodeURIComponent(selectedRobot)}`),
+    apiRobot(`/api/l1_frames?robot_id=${encodeURIComponent(selectedRobot)}`),
+  ]);
+  const all = allR.items;
+  const l1 = l1R.items;
+  const groups = {L2:[], L3:[], L4:[]};
+  all.forEach(m => groups[m.layer]?.push(m));
+
+  const l1Section = el("div", "layer-section");
+  l1Section.appendChild(el("div", "layer-title",
+    '<span class="badge L1">L1</span> 感知层（瞬时·进程内）'));
+  if(!l1.length) l1Section.appendChild(el("div","empty","暂无感知帧"));
+  else l1.slice().reverse().forEach(f => {
+    const c = el("div","mem-card");
+    c.innerHTML = `<div class="top"><span class="badge L1">L1</span>
+      <span class="id">${escapeHtml(f.modality||"text")}</span>
+      <span class="imp">${escapeHtml(f.ts||"")}</span></div>
+      <div class="summary">${escapeHtml(f.text||"")}</div>`;
+    l1Section.appendChild(c);
+  });
+  pane.appendChild(l1Section);
+
+  const titles = {
+    L2:"工作层（短期·当前会话）",
+    L3:"偏好层（中期·习惯/偏好）",
+    L4:"固化层（长期·人格底座）",
+  };
+  ["L2","L3","L4"].forEach(layer => {
+    const sect = el("div", "layer-section");
+    sect.appendChild(el("div","layer-title",
+      `<span class="badge ${layer}">${layer}</span> ${titles[layer]} (${groups[layer].length})`));
+    if(!groups[layer].length) sect.appendChild(el("div","empty","暂无"));
+    else groups[layer].forEach(m => sect.appendChild(memCard(m, true)));
+    pane.appendChild(sect);
+  });
+}
+
+async function refreshConversations(){
+  const pane = $("pane-conversations");
+  pane.innerHTML = "";
+  if(!selectedRobot) return;
+  const data = await apiRobot(
+    `/api/conversations?robot_id=${encodeURIComponent(selectedRobot)}&limit=200`);
+  if(!data.items.length){
+    pane.appendChild(el("div","empty","暂无对话"));
+    return;
+  }
+  data.items.forEach(m => {
+    const row = el("div", "msg-row " + m.role);
+    row.innerHTML = `<div class="meta">
+        <span class="role">${escapeHtml(m.role)}</span>
+        · session ${escapeHtml(m.session_id||"")}
+        · ${escapeHtml(m.created_at||"")}</div>
+      <div>${escapeHtml(m.content)}</div>`;
+    pane.appendChild(row);
+  });
+}
+
+async function refreshReminders(){
+  const pane = $("pane-reminders");
+  pane.innerHTML = "";
+  if(!selectedRobot) return;
+  const data = await apiRobot(`/api/reminders?robot_id=${encodeURIComponent(selectedRobot)}`);
+  const items = data.items;
+  const groups = {pending:[], fired:[], cancelled:[]};
+  items.forEach(it => (groups[it.status]||groups.pending).push(it));
+  const titles = {pending:"待提醒", fired:"已提醒", cancelled:"已取消"};
+  ["pending","fired","cancelled"].forEach(st => {
+    const sect = el("div","layer-section");
+    sect.appendChild(el("div","layer-title",
+      `<span class="badge ${st==="pending"?"L3":st==="fired"?"L4":"L1"}">${st}</span> ${titles[st]} (${groups[st].length})`));
+    if(!groups[st].length) sect.appendChild(el("div","empty","暂无"));
+    else groups[st].forEach(it => {
+      const c = el("div","mem-card");
+      const cancelBtn = st==="pending"
+        ? `<button class="del-btn" data-cancel="${it.id}">取消</button>` : "";
+      c.innerHTML = `<div class="top">
+          <span class="badge ${st==="pending"?"L3":st==="fired"?"L4":"L1"}">#${it.id}</span>
+          <span class="id">${escapeHtml(it.remind_at)}</span>${cancelBtn}</div>
+        <div class="summary">${escapeHtml(it.content)}</div>
+        ${it.note?`<div class="tags"><span class="tag">备注 ${escapeHtml(it.note)}</span></div>`:""}
+        ${it.fired_message?`<div class="summary" style="margin-top:6px;color:var(--muted)"><b>已说：</b>${escapeHtml(it.fired_message)}</div>`:""}`;
+      sect.appendChild(c);
+    });
+    pane.appendChild(sect);
+  });
+  pane.querySelectorAll("button[data-cancel]").forEach(b => {
+    b.addEventListener("click", async () => {
+      await apiRobot(`/api/reminders/${b.dataset.cancel}`, "DELETE");
+      refreshReminders();
+    });
+  });
+}
+
+async function refreshProactiveLog(){
+  const pane = $("pane-proactive-log");
+  pane.innerHTML = "";
+  if(!selectedRobot) return;
+  const data = await apiRobot(
+    `/api/proactive_log?robot_id=${encodeURIComponent(selectedRobot)}`);
+  if(!data.items.length){
+    pane.appendChild(el("div","empty","暂无主动决策日志"));
+    return;
+  }
+  data.items.forEach(it => {
+    const c = el("div", "mem-card");
+    c.innerHTML = `<div class="top">
+        <span class="badge ${it.decision==="speak"?"L4":"L1"}">${escapeHtml(it.decision)}</span>
+        <span class="id">#${it.id}</span>
+        <span class="imp">${escapeHtml(it.created_at)}</span></div>
+      <div class="summary"><b>触发：</b>${escapeHtml(it.trigger||"")}</div>
+      ${it.content?`<div class="summary" style="margin-top:4px"><b>内容：</b>${escapeHtml(it.content)}</div>`:""}
+      <div class="tags">${(it.related_memory_ids||[]).map(x=>`<span class="tag">引用 #${x}</span>`).join("")}</div>`;
+    pane.appendChild(c);
+  });
+}
+
+function refreshPane(name){
+  if(name === "memories") refreshMemories();
+  else if(name === "conversations") refreshConversations();
+  else if(name === "reminders") refreshReminders();
+  else if(name === "proactive-log") refreshProactiveLog();
+}
+
+document.querySelectorAll(".tab").forEach(t => {
+  t.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(x => x.classList.remove("active"));
+    document.querySelectorAll(".pane").forEach(x => x.classList.remove("active"));
+    t.classList.add("active");
+    $("pane-" + t.dataset.pane).classList.add("active");
+    refreshPane(t.dataset.pane);
+  });
+});
+
+const searchInput = $("search");
+searchInput.setAttribute("readonly", "readonly");
+searchInput.addEventListener("focus", () => searchInput.removeAttribute("readonly"));
+
+searchInput.addEventListener("input", () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(loadRobots, 300);
+});
+
+$("btn-refresh").addEventListener("click", async () => {
+  try{
+    await loadServiceInfo();
+    await loadRobots();
+    if(selectedRobot){
+      await renderDetailHeader();
+      const active = document.querySelector(".tab.active");
+      if(active) refreshPane(active.dataset.pane);
+    }
+    setStatus("已刷新");
+  }catch(e){ alert(e.message); }
+});
+
+$("btn-token").addEventListener("click", () => {
+  $("token-input").value = sessionStorage.getItem(LS_TOKEN) || "";
+  $("token-mask").classList.add("show");
+});
+$("token-cancel").addEventListener("click", () => $("token-mask").classList.remove("show"));
+$("token-save").addEventListener("click", () => {
+  const v = $("token-input").value.trim();
+  if(v) sessionStorage.setItem(LS_TOKEN, v);
+  else sessionStorage.removeItem(LS_TOKEN);
+  $("token-mask").classList.remove("show");
+  setStatus(v ? "Token 已保存" : "Token 已清除");
+});
+
+document.querySelectorAll(".sidebar-nav button").forEach(b => {
+  b.addEventListener("click", () => switchMode(b.dataset.mode));
+});
+$("btn-save-config").addEventListener("click", saveConfig);
+$("btn-reload-config").addEventListener("click", () => {
+  loadConfig().catch(e => alert(e.message));
+});
+
+async function loadVoiceCatalog(){
+  try{
+    const data = await api("/api/admin/config");
+    configData = data.config || configData;
+    ttsVoices = data.tts_voices || [];
+    syncVoiceSelects();
+  }catch(e){
+    try{
+      const schema = await apiRobot("/api/schema");
+      ttsVoices = schema.tts_voices || [];
+      syncVoiceSelects();
+    }catch(_){
+      $("header-voice").innerHTML = '<option value="">加载失败</option>';
+    }
+  }
+}
+
+$("header-voice").addEventListener("change", e => {
+  applyVoiceImmediate(e.target.value, "header");
+});
+
+$("btn-speech-toggle").addEventListener("click", () => toggleSpeech());
+$("btn-restart").addEventListener("click", () => restartService());
+
+loadServiceInfo().catch(() => {});
+loadVoiceCatalog().catch(() => {});
+loadRobots().catch(e => {
+  $("robot-list").innerHTML = `<div class="empty">加载失败：${escapeHtml(e.message)}</div>`;
+});
+</script>
+</body>
+</html>
