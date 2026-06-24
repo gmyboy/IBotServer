@@ -17,12 +17,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.pophie.app.data.ApiClient
 import com.pophie.app.ui.ActivationWizardScreen
 import com.pophie.app.ui.ChatScreen
 import com.pophie.app.ui.SettingsScreen
 import com.pophie.app.viewmodel.ChatViewModel
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
     private val permissionLauncher = registerForActivityResult(
@@ -59,7 +61,7 @@ class MainActivity : ComponentActivity() {
                                 onComplete = { owner ->
                                     ApiClient.saveOwnerProfile(this@MainActivity, owner)
                                     activated = true
-                                    chatViewModel.refreshSession()
+                                    chatViewModel.onActivationComplete()
                                 },
                             )
                         }
@@ -88,6 +90,9 @@ class MainActivity : ComponentActivity() {
                                     showSettings = false
                                 },
                                 onResetOwner = {
+                                    lifecycleScope.launch {
+                                        ApiClient.deleteOwnerRemote(this@MainActivity)
+                                    }
                                     ApiClient.clearOwnerProfile(this)
                                     activated = false
                                     chatViewModel.resetRobotIdentity()

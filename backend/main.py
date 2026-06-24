@@ -28,7 +28,7 @@ log = logging.getLogger("pophie")
 
 from .config import (
     SERVER_CFG, SPEECH_CFG, CHAT_CFG,
-    ADMIN_CONFIG_SCHEMA, get_config_for_admin, save_config,
+    ADMIN_CONFIG_SCHEMA, get_config_for_admin, save_config, config_secret_issues,
 )
 from .database import (
     init_db, get_conn, row_to_dict, touch_robot,
@@ -47,6 +47,7 @@ from .reminder import (
     extract_reminders, schedule_reminders, list_reminders, cancel_reminder,
     start_scheduler,
 )
+from .welcome import send_welcome_message
 from .schemas import (
     AudioPayload, ChatRequest, ChatResponse, FacialExpression,
     FACIAL_EXPRESSION_LABELS, FACIAL_EXPRESSION_ALIASES, GESTURE_LABELS,
@@ -68,6 +69,8 @@ app = FastAPI(title="Pophie")
 @app.on_event("startup")
 async def _on_startup():
     start_scheduler()
+    for issue in config_secret_issues():
+        log.warning("[startup] %s", issue)
     if SPEECH_CFG.get("enabled"):
         log.info("[startup] speech enabled STT=%s TTS=%s (Python %s)",
                  speech._stt_engine(), speech.tts_engine(),
@@ -552,11 +555,23 @@ def put_owner(robot_id: str, req: OwnerProfilePutRequest):
         )
     except ValidationError as e:
         raise HTTPException(400, str(e.errors()[0].get("msg", e))) from e
+    is_new = get_owner_profile(robot_id) is None
     saved = upsert_owner_profile(robot_id, profile.model_dump())
     owner = OwnerProfile(**saved)
+    welcome_message = None
+    session_id = None
+    if is_new:
+        session_id = _ensure_session(req.session_id)
+        welcome_message = send_welcome_message(
+            robot_id, session_id, saved,
+            user_id=nickname or "default",
+        )
     return OwnerProfilePutResponse(
         robot_id=robot_id,
         owner=owner,
+        is_new=is_new,
+        welcome_message=welcome_message,
+        session_id=session_id,
     ).model_dump()
 
 

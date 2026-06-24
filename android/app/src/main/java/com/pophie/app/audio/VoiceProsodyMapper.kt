@@ -21,6 +21,7 @@ object VoiceProsodyMapper {
             FacialExpression.SURPRISE -> { pitch = 1.25f; rate = 1.15f }
             FacialExpression.DISGUST -> { pitch = 0.88f; rate = 0.95f }
             FacialExpression.NEUTRAL -> { pitch = 1.0f; rate = 1.0f }
+            null -> { }
         }
 
         when (voice?.speed) {

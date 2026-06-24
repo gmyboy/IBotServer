@@ -239,3 +239,20 @@ def reload_runtime_config() -> None:
     SERVER_CFG = CONFIG["server"]
     SPEECH_CFG = CONFIG.get("speech", {"enabled": False})
     CHAT_CFG = CONFIG.get("chat", {})
+
+
+def config_secret_issues(cfg: dict | None = None) -> list[str]:
+    """返回未配置密钥的提示列表（空列表表示关键项已就绪）。"""
+    cfg = cfg or CONFIG
+    issues: list[str] = []
+    if not (_get_nested(cfg, ["llm", "api_key"]) or "").strip():
+        issues.append("llm.api_key 未配置（config.yaml 或环境变量 LLM_API_KEY）")
+    if _get_nested(cfg, ["speech", "enabled"]):
+        tts_key = (_get_nested(cfg, ["speech", "tts", "api_key"]) or "").strip()
+        stt_key = (_get_nested(cfg, ["speech", "stt", "api_key"]) or "").strip()
+        if not (tts_key or stt_key):
+            issues.append(
+                "speech 已启用但 DashScope Key 未配置"
+                "（speech.tts.api_key 或环境变量 DASHSCOPE_API_KEY）"
+            )
+    return issues

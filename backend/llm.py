@@ -33,12 +33,26 @@ def _chat_max_tokens() -> int | None:
     return val if val > 0 else None
 
 
+def _llm_api_key() -> str:
+    return (LLM_CFG.get("api_key") or "").strip()
+
+
+def _require_llm_api_key() -> str:
+    key = _llm_api_key()
+    if not key:
+        raise LLMError(
+            "LLM API Key 未配置，请在 config.yaml 填写 llm.api_key "
+            "或设置环境变量 LLM_API_KEY"
+        )
+    return key
+
+
 def chat(messages, *, temperature=None, response_format=None,
          user_facing: bool = True) -> str:
     """同步调用 chat completions，返回 assistant 文本内容。"""
     url = LLM_CFG["base_url"].rstrip("/") + "/chat/completions"
     headers = {
-        "Authorization": f"Bearer {LLM_CFG['api_key']}",
+        "Authorization": f"Bearer {_require_llm_api_key()}",
         "Content-Type": "application/json",
     }
     payload = {
@@ -179,7 +193,7 @@ def iter_chat_stream(messages, *, temperature=None, user_facing: bool = True):
     """流式调用 chat completions，逐块 yield content delta。"""
     url = LLM_CFG["base_url"].rstrip("/") + "/chat/completions"
     headers = {
-        "Authorization": f"Bearer {LLM_CFG['api_key']}",
+        "Authorization": f"Bearer {_require_llm_api_key()}",
         "Content-Type": "application/json",
     }
     if temperature is None:

@@ -20,10 +20,11 @@
 1. GET  /api/health          → 确认服务与语音能力（tts_engine=dashscope-realtime）
 2. GET  /api/schema          → 拉取表情枚举、TTS 音色列表
 3. POST /api/session/new     → 获取 session_id（也可自行生成）
-4. PUT  /api/robots/{robot_id}/owner → 首次激活时注册主人档案（见 §3.16）
-5. POST /api/chat            → 主对话（建议 input.skip_tts=true，先拿文字）
-6. POST /api/tts/stream      → 流式合成并边收边播（推荐，见 §3.6.1）
-7. GET  /api/proactive_messages → 轮询主动消息（可选；播放同样走 §3.6.1）
+4. PUT  /api/robots/{robot_id}/owner → 首次激活时注册主人档案（见 §3.16）；**建议携带 `session_id`**
+5. （首次注册）展示响应中的 `welcome_message` 并 TTS 播放
+6. POST /api/chat            → 主对话（建议 input.skip_tts=true，先拿文字）
+7. POST /api/tts/stream      → 流式合成并边收边播（推荐，见 §3.6.1）
+8. GET  /api/proactive_messages → 轮询主动消息（可选；播放同样走 §3.6.1）
 ```
 
 **语音对话时序（推荐）：**
@@ -1105,7 +1106,7 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
 
 #### 注册/更新主人档案
 
-**`PUT /api/robots/{robot_id}/owner`** — 幂等 upsert。已存在则覆盖，不存在则创建。
+**`PUT /api/robots/{robot_id}/owner`** — 幂等 upsert。已存在则覆盖，不存在则创建。**首次创建**时服务端会生成欢迎自我介绍，并写入当前会话的主动消息流。
 
 **请求体：**
 
@@ -1117,11 +1118,17 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
     "gender": "male",
     "birthday": "1990-01-01",
     "face_registered": true
-  }
+  },
+  "session_id": "sess-a1b2c3d4"
 }
 ```
 
-**响应 200：**
+| 字段 | 说明 |
+|------|------|
+| `owner` | 主人档案，见 §2.8 |
+| `session_id` | 可选。建议客户端在 `POST /api/session/new` 后传入，确保欢迎语写入正确会话；省略时服务端自动生成 |
+
+**响应 200（首次注册）：**
 
 ```json
 {
@@ -1133,7 +1140,29 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
     "gender": "male",
     "birthday": "1990-01-01",
     "face_registered": true
-  }
+  },
+  "is_new": true,
+  "welcome_message": "小明，很高兴认识你！我是狗蛋，以后我会一直陪在你身边～",
+  "session_id": "sess-a1b2c3d4"
+}
+```
+
+**响应 200（更新已有档案）：**
+
+```json
+{
+  "ok": true,
+  "robot_id": "robot-xxx",
+  "owner": {
+    "nickname": "小明",
+    "robot_name": "狗蛋",
+    "gender": "male",
+    "birthday": "1990-01-01",
+    "face_registered": true
+  },
+  "is_new": false,
+  "welcome_message": null,
+  "session_id": null
 }
 ```
 
@@ -1142,6 +1171,11 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
 | `ok` | 操作是否成功 |
 | `robot_id` | 回显归属机器人 ID |
 | `owner` | 服务端落库后的主人档案（已做字段校验与归一，如 `gender` 非法时置 `null`） |
+| `is_new` | 是否首次创建（`true` 表示本次为首次注册） |
+| `welcome_message` | 仅 `is_new=true` 时返回；机器人主动自我介绍文案，客户端应**立即展示并 TTS 播放** |
+| `session_id` | 仅 `is_new=true` 时返回；欢迎语写入的会话 ID，客户端应保存并用于后续请求 |
+
+> 欢迎语同时写入 `conversations(role=proactive)` 与 `proactive_log`，可通过 `GET /api/proactive_messages` 增量拉取；客户端若在响应中已展示，应将 `since_id` 游标对齐到 `last_id`，避免轮询重复显示。
 
 #### 查询主人档案
 
@@ -1188,7 +1222,8 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
 端侧采用**本地优先 + 后端 best-effort**：
 
 - 向导完成时本地档案立即生效并进入主界面，**不阻塞**于网络；
-- 完成时调 `PUT`，失败则静默记录「待同步」，后续后台重试；
+- 完成时先 `POST /api/session/new` 拿到 `session_id`，再调 `PUT`（携带 `session_id`）；失败则静默记录「待同步」，后续后台重试；
+- `is_new=true` 且 `welcome_message` 非空时，立即展示并走 `POST /api/tts/stream` 播放，再将主动消息游标对齐；
 - 重置时调 `DELETE`（best-effort），失败不阻断本地重置。
 
 ---
@@ -1207,6 +1242,11 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
 - 设置页配置 `voice_id`，写入 `ChatInput.voice_id` 与流式 TTS 请求的 `voice_id`
 - 流式请求体与 `TtsRequest` 相同：`text`、`voice`（取自 `output.voice`）、`voice_id`
 - 语音 STT 失败时 `output.text` 为空，应提示「未能识别语音」
+- **首次激活欢迎语：**
+  1. `POST /api/session/new` 获取 `session_id`
+  2. `PUT /api/robots/{robot_id}/owner` 携带 `session_id`
+  3. 若 `is_new=true` 且 `welcome_message` 非空，展示并 `POST /api/tts/stream` 播放
+  4. 调用 `GET /api/proactive_messages` 将 `since_id` 对齐到 `last_id`，避免轮询重复
 - 主动消息：`GET /api/proactive_messages?since_id=<last>`，播放走 `/api/tts/stream`
 
 ### 4.2 Web
@@ -1322,10 +1362,11 @@ curl -X POST http://127.0.0.1:8000/api/tts \
   -H "Content-Type: application/json" \
   -d '{"text":"你好","voice_id":"gentle_female"}'
 
-# 注册/更新主人档案（首次激活向导完成时）
+# 注册/更新主人档案（首次激活向导完成时；建议先建 session）
+curl -X POST "http://127.0.0.1:8000/api/session/new?robot_id=robot-xxx"
 curl -X PUT http://127.0.0.1:8000/api/robots/robot-xxx/owner \
   -H "Content-Type: application/json" \
-  -d '{"owner":{"nickname":"小明","robot_name":"狗蛋","gender":"male","birthday":"1990-01-01","face_registered":true}}'
+  -d '{"session_id":"sess-a1b2c3d4","owner":{"nickname":"小明","robot_name":"狗蛋","gender":"male","birthday":"1990-01-01","face_registered":true}}'
 
 # 查询主人档案
 curl http://127.0.0.1:8000/api/robots/robot-xxx/owner

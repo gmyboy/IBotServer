@@ -93,5 +93,18 @@ if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
   exit 1
 fi
 
+if ! python -c "
+from backend.config import config_secret_issues
+issues = config_secret_issues()
+llm_missing = any('llm.api_key' in i for i in issues)
+for issue in issues:
+    print(f'[warn] {issue}')
+raise SystemExit(1 if llm_missing else 0)
+"; then
+  echo "[error] LLM API Key 未配置，无法启动" >&2
+  echo "        编辑 config.yaml 的 llm.api_key，或执行: cp .env.example .env 后填入 LLM_API_KEY" >&2
+  exit 1
+fi
+
 echo "[info] server listening on $HOST:$PORT"
 python -m backend.main

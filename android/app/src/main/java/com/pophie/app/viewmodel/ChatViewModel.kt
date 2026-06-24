@@ -9,6 +9,7 @@ import com.pophie.app.audio.AudioRecorder
 import com.pophie.app.audio.AudioRouteHelper
 import com.pophie.app.audio.ChatStreamClient
 import com.pophie.app.data.ApiClient
+import com.pophie.app.data.PophieApi
 import com.pophie.app.data.model.AudioPayload
 import com.pophie.app.data.model.ChatInput
 import com.pophie.app.data.model.ChatRequest
@@ -82,26 +83,63 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private var msgId = 0L
     private var proactiveSinceId = 0L
     private var pollJob: Job? = null
+    private var initJob: Job? = null
     private val speakMutex = Mutex()
 
     init {
-        initSession()
+        if (ApiClient.isActivated(getApplication())) {
+            initSession()
+        }
     }
 
-    private fun initSession(forceNewSession: Boolean = false) {
-        viewModelScope.launch {
+    /** 首次激活向导完成后调用：注册主人档案并展示欢迎语。 */
+    fun onActivationComplete() {
+        pollJob?.cancel()
+        initJob?.cancel()
+        proactiveSinceId = 0L
+        _uiState.update { it.copy(messages = emptyList()) }
+        initSession(isActivation = true)
+    }
+
+    private fun initSession(forceNewSession: Boolean = false, isActivation: Boolean = false) {
+        initJob?.cancel()
+        initJob = viewModelScope.launch {
             try {
                 val app = getApplication<Application>()
                 val api = ApiClient.api(app)
                 val health = api.health()
                 val robotId = ApiClient.getOrCreateRobotId(app)
-                ApiClient.syncOwnerProfile(app)
                 var sessionId = if (forceNewSession) null else ApiClient.getSessionId(app)
                 if (sessionId.isNullOrBlank()) {
                     val session = api.newSession(robotId = robotId)
                     sessionId = session.sessionId
                     ApiClient.saveSessionId(app, sessionId)
                 }
+                val ownerResp = ApiClient.syncOwnerProfile(app, sessionId)
+                if (!ownerResp?.sessionId.isNullOrBlank()) {
+                    sessionId = ownerResp!!.sessionId!!
+                    ApiClient.saveSessionId(app, sessionId)
+                }
+                var welcomed = false
+                if (!ownerResp?.welcomeMessage.isNullOrBlank()) {
+                    showWelcomeMessage(ownerResp!!.welcomeMessage!!, health.speechEnabled)
+                    welcomed = true
+                }
+                if (!welcomed && isActivation) {
+                    val pm = api.proactiveMessages(
+                        robotId = robotId,
+                        sessionId = sessionId,
+                        sinceId = 0,
+                    )
+                    for (item in pm.items) {
+                        if (item.content.isBlank()) continue
+                        showWelcomeMessage(item.content, health.speechEnabled)
+                        welcomed = true
+                    }
+                }
+                proactiveSinceId = syncProactiveCursor(api, robotId, sessionId!!)
+                val owner = ApiClient.getOwnerProfile(app)
+                val robotLabel = owner?.robotName?.let { " · $it" } ?: ""
                 _uiState.update {
                     it.copy(
                         robotId = robotId,
@@ -109,7 +147,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                         speechEnabled = health.speechEnabled,
                         voiceId = ApiClient.getVoiceId(app),
                         voiceLabel = TtsVoices.labelFor(ApiClient.getVoiceId(app)),
-                        sessionLabel = "${ApiClient.robotIdShort(robotId)} / $sessionId" +
+                        sessionLabel = "${ApiClient.robotIdShort(robotId)} / $sessionId$robotLabel" +
                             if (health.speechEnabled) " · 语音已启用" else " · 仅文本",
                         error = null,
                     )
@@ -126,8 +164,40 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private suspend fun syncProactiveCursor(
+        api: PophieApi,
+        robotId: String,
+        sessionId: String,
+    ): Long = try {
+        api.proactiveMessages(
+            robotId = robotId,
+            sessionId = sessionId,
+            sinceId = proactiveSinceId,
+        ).lastId
+    } catch (_: Exception) {
+        proactiveSinceId
+    }
+
+    private suspend fun showWelcomeMessage(text: String, speechEnabled: Boolean) {
+        val msg = ChatMessage(
+            id = ++msgId,
+            role = "proactive",
+            text = text,
+            expression = "neutral",
+        )
+        _uiState.update { it.copy(messages = it.messages + msg) }
+        if (speechEnabled) {
+            withContext(Dispatchers.Main) {
+                AudioRouteHelper.prepareForPlayback(getApplication())
+            }
+            val voiceId = ApiClient.getVoiceId(getApplication())
+            speakRobot(text = text, serverAudio = null, voiceId = voiceId)
+        }
+    }
+
     fun startNewConversation() {
         pollJob?.cancel()
+        initJob?.cancel()
         ApiClient.clearSessionId(getApplication())
         _uiState.update { it.copy(messages = emptyList()) }
         proactiveSinceId = 0L
@@ -136,6 +206,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun resetRobotIdentity() {
         pollJob?.cancel()
+        initJob?.cancel()
         ApiClient.resetRobotIdentity(getApplication())
         _uiState.update { it.copy(messages = emptyList()) }
         proactiveSinceId = 0L
@@ -144,6 +215,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     fun refreshSession() {
         pollJob?.cancel()
+        initJob?.cancel()
         _uiState.update {
             it.copy(
                 voiceId = ApiClient.getVoiceId(getApplication()),
@@ -516,6 +588,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     override fun onCleared() {
         super.onCleared()
         pollJob?.cancel()
+        initJob?.cancel()
         speaker.shutdown()
     }
 }

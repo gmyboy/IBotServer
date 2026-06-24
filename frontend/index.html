@@ -391,12 +391,15 @@ function effectiveUserId(){
   return (OWNER?.nickname || "").trim() || null;
 }
 
-async function syncOwnerProfile(owner){
-  if(!ROBOT || !owner) return;
+async function syncOwnerProfile(owner, sessionId){
+  if(!ROBOT || !owner) return null;
   try{
-    await api(`/api/robots/${encodeURIComponent(ROBOT)}/owner`, "PUT", {owner});
+    const body = {owner};
+    if(sessionId) body.session_id = sessionId;
+    return await api(`/api/robots/${encodeURIComponent(ROBOT)}/owner`, "PUT", body);
   }catch(e){
     console.warn("主人档案同步失败，将稍后重试", e);
+    return null;
   }
 }
 
@@ -436,9 +439,33 @@ async function completeWizard(){
   saveOwner(owner);
   ROBOT = getOrCreateRobotId();
   showWizard(false);
-  await syncOwnerProfile(owner);
   if(!SESSION) await newSession();
+  let resp = null;
+  try{
+    resp = await syncOwnerProfile(owner, SESSION);
+  }catch(e){
+    console.warn("主人档案同步失败", e);
+    alert("注册失败，请检查网络后重试");
+    return;
+  }
+  if(resp?.session_id){
+    SESSION = resp.session_id;
+    saveSession(SESSION);
+  }
+  let welcomeText = resp?.welcome_message;
+  if(!welcomeText && resp?.is_new){
+    try{
+      const pm = await api(`/api/proactive_messages?robot_id=${encodeURIComponent(ROBOT)}&session_id=${encodeURIComponent(SESSION)}&since_id=0`);
+      welcomeText = (pm.items || []).map(it => it.content).filter(Boolean).pop();
+    }catch(_){}
+  }
+  if(welcomeText){
+    appendMsg("proactive", welcomeText);
+    await playReplyAudio(welcomeText, null);
+  }
+  await syncProactiveCursor();
   $("sess-meta").textContent = `robot=${ROBOT.slice(0,12)}… · ${owner.robot_name} · session=${SESSION}`;
+  startProactivePolling();
 }
 
 function getOrCreateRobotId(){
@@ -1072,8 +1099,6 @@ $("wizard-next").addEventListener("click", async () => {
     await completeWizard();
     await refreshMemories();
     await loadTtsVoices();
-    await syncProactiveCursor();
-    startProactivePolling();
   }
 });
 $("wizard-back").addEventListener("click", () => {

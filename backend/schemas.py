@@ -373,12 +373,16 @@ class OwnerProfile(BaseModel):
 
 class OwnerProfilePutRequest(BaseModel):
     owner: OwnerProfile
+    session_id: Optional[str] = None
 
 
 class OwnerProfilePutResponse(BaseModel):
     ok: bool = True
     robot_id: str
     owner: OwnerProfile
+    is_new: bool = False
+    welcome_message: Optional[str] = None
+    session_id: Optional[str] = None
 
 
 def perception_to_dict(perception: Optional[PerceptionInput]) -> Dict:
