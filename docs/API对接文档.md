@@ -8,26 +8,40 @@
 
 | 项目 | 说明 |
 |------|------|
-| 协议 | HTTP/1.1（TTS 流式为 `application/x-ndjson` 行流） |
-| 数据格式 | `application/json`；音频在 JSON 内为 Base64，流式 TTS 按行推送 |
+| 协议 | HTTP/1.1；TTS / 聊天流式为 `application/x-ndjson` 行流；**对话模式 STT** 为 **WebSocket**（`WS /api/stt/stream`） |
+| 数据格式 | `application/json`；音频在 JSON 内为 Base64，流式 TTS 按行推送；流式 STT 上行 `chunk.data` 为 Base64 PCM |
 | 默认地址 | `http://<host>:8000`（`config.yaml` 中 `server.host` / `server.port` 可配置） |
 | 跨域 | 已开启 CORS，`allow_origins: *` |
 | 默认机器人 | `default`（`robot_id` 省略时使用） |
 
 ### 1.1 推荐对接流程
 
+**文字 / 调试（Web 管理页）：**
+
 ```
-1. GET  /api/health          → 确认服务与语音能力（tts_engine=dashscope-realtime）
+1. GET  /api/health          → 确认 speech_enabled、stt_stream、tts_engine
 2. GET  /api/schema          → 拉取表情枚举、TTS 音色列表
 3. POST /api/session/new     → 获取 session_id（也可自行生成）
 4. PUT  /api/robots/{robot_id}/owner → 首次激活时注册主人档案（见 §3.16）；**建议携带 `session_id`**
 5. （首次注册）展示响应中的 `welcome_message` 并 TTS 播放
 6. POST /api/chat            → 主对话（建议 input.skip_tts=true，先拿文字）
-7. POST /api/tts/stream      → 流式合成并边收边播（推荐，见 §3.6.1）
+7. POST /api/tts/stream      → 流式合成并边收边播（见 §3.6.1）
 8. GET  /api/proactive_messages → 轮询主动消息（可选；播放同样走 §3.6.1）
 ```
 
-**语音对话时序（推荐）：**
+**语音对话模式（XBot / 端侧虚拟宠物，推荐）：**
+
+```
+1. GET  /api/health          → speech_enabled=true 且 stt_stream=true
+2. （用户唤醒）WS /api/stt/stream → start → ready
+3. 边录边发 chunk            → partial（可选 UI）→ final(text, voice)
+4. POST /api/chat/stream     → speak* → done（仅 input.text，voice 放 perception.voice）
+5. POST /api/tts/stream      → 边收边播（可对每个 speak 分句提前开 TTS）
+6. 回到步骤 3（同一条 WS，多轮复用）
+7. （退出对话）发送 end      → 关闭 WS、关麦
+```
+
+**文字对话时序：**
 
 ```
 客户端                    服务端
@@ -36,6 +50,28 @@
   |-- POST /api/tts/stream ------------>|
   |<-- NDJSON: meta/chunk*/done --------|  （首包 ~500ms 可开口）
 ```
+
+**对话模式时序（一轮用户发言）：**
+
+```
+客户端                    服务端
+  |== WS /api/stt/stream (已连接) ======|
+  |-- start ---------------------------->|
+  |<-- meta / ready ---------------------|
+  |-- chunk* --------------------------->|  （16kHz PCM16 mono，~100ms/片）
+  |<-- partial* ------------------------|  （可选）
+  |<-- final(text, voice) --------------|  （云侧 turn_detection 或端侧 commit）
+  |-- POST /api/chat/stream ------------>|
+  |<-- NDJSON: speak* / done ------------|
+  |-- POST /api/tts/stream (每句 speak) >|
+  |<-- NDJSON: meta/chunk*/done --------|
+  |-- chunk* ...（下一轮聆听，WS 不断）--|
+  |<-- session_end（可选，空闲超时） -----|  → 服务端关 WS；端侧退出对话模式
+```
+
+> **说明：** 对话模式**不**走 `input.audio` 批量上传；STT 与 LLM 解耦。`final.voice` 应写入 `input.perception.voice` 再调 `/api/chat/stream`，以便大模型与 TTS 感知用户语气。TTS 播放期间当前版本**不**支持用户插话打断（barge-in），播完再回到聆听。
+>
+> **会话回收：** 若 `meta.conversation_idle_sec` 内**无** `partial` 且**无**有效 `final`（`text` 非空），服务端会主动发 `session_end` 并关闭 WebSocket，**无需**客户端发 `end`。仅上传静音 `chunk` **不会**刷新该计时。
 
 ### 1.2 身份与会话
 
@@ -52,7 +88,11 @@
 |--------|--------|------|
 | `chat.defer_side_tasks` | `true` | 记忆写入与提醒提取放后台；为 `true` 时 `/api/chat` 响应中 `memory_flow`、`l1_frames` 恒为 `[]` |
 | `chat.inline_tts` | `true` | 为 `true` 且未设 `skip_tts` 时 `/api/chat` 内嵌完整 TTS（`output.audio` 为 MP3）；**推荐客户端设 `skip_tts: true` 并走 `/api/tts/stream`** |
-| `speech.enabled` | `true` | 关闭后无 STT/TTS，`/api/stt`、`/api/tts`、`/api/tts/stream` 返回 503 |
+| `speech.enabled` | `true` | 关闭后无 STT/TTS；`POST /api/stt`、`WS /api/stt/stream`、`/api/tts`、`/api/tts/stream` 不可用 |
+| `speech.stt.turn_detection` | `true` | **流式 STT** 云侧自动断句；`false` 时依赖端侧 VAD + `commit` |
+| `speech.stt.silence_commit_ms` | `600` | 通过 WS `meta` 下发给端侧，静音超过该毫秒可发 `commit` 兜底 |
+| `speech.stt.stream_conversation_idle_sec` | `60` | **对话空闲超时（秒）**：超时无 partial/有效 final 时服务端主动 `session_end` 并关 WS |
+| `speech.stt.sample_rate` | `16000` | STT 输入采样率（流式 `chunk` 与批量 WAV 均须一致） |
 | `speech.tts.base_url` | `wss://dashscope.aliyuncs.com/api-ws/v1/inference` | CosyVoice **实时 WebSocket** 端点（北京地域） |
 | `speech.tts.model` | `cosyvoice-v3-flash` | TTS 模型 |
 | `speech.tts.format` | `mp3` | **`POST /api/tts`** 与 **`inline_tts` 内嵌音频** 的输出格式 |
@@ -115,9 +155,14 @@ LLM 会根据 `facial_expression` 自动补全默认 `voice`；客户端也可�
 | `sample_rate` | STT 输入建议 **16000**；TTS 输出通常为 **22050** |
 | `data` | Base64 字符串，**不含** `data:audio/...` 前缀 |
 
-**STT 输入要求**：16kHz、单声道、PCM WAV（客户端录音后编码即可）。
+**STT 输入要求**：
 
-> **TTS 播放**：官方 Web / Android 客户端默认不在 `/api/chat` 等待内嵌音频，而是 `skip_tts: true` 后调 **`POST /api/tts/stream`**。`AudioPayload` 仍用于 STT 上传、以及可选的批量 `/api/tts`、旧版 `inline_tts` 内嵌播放。
+| 方式 | 格式 | 接口 |
+|------|------|------|
+| **对话模式（推荐）** | 16kHz、单声道、**PCM16 分片**（Base64 放入 WS `chunk.data`） | `WS /api/stt/stream` |
+| 批量（兼容 / 调试） | 16kHz、单声道、**PCM WAV**（整段 Base64） | `POST /api/stt`、`POST /api/chat` 的 `input.audio` |
+
+> **TTS 播放**：推荐 `skip_tts: true` 后调 **`POST /api/tts/stream`**。`AudioPayload` 仍用于批量 STT 上传、批量 `/api/tts`、以及可选的 `inline_tts` 内嵌播放。
 
 **批量播放示例（JavaScript，`/api/tts` 或内嵌 `output.audio`）**：
 
@@ -318,6 +363,7 @@ CosyVoice v3 音色（通过 `GET /api/schema` 的 `tts_voices` 动态获取；`
   "ok": true,
   "speech_enabled": true,
   "stt_engine": "dashscope",
+  "stt_stream": true,
   "tts_engine": "dashscope-realtime"
 }
 ```
@@ -326,6 +372,7 @@ CosyVoice v3 音色（通过 `GET /api/schema` 的 `tts_voices` 动态获取；`
 |------|------|
 | `speech_enabled` | 语音模块是否可用 |
 | `stt_engine` | 当前 STT 引擎：`dashscope`（`qwen3-asr-flash-realtime`）；`speech.enabled=false` 时为 `null` |
+| `stt_stream` | 是否支持 **`WS /api/stt/stream`** 流式识别；与 `speech_enabled` 同开同关 |
 | `tts_engine` | 当前 TTS 引擎：`dashscope-realtime`（CosyVoice WebSocket）；`speech.enabled=false` 时为 `null` |
 
 ---
@@ -466,7 +513,31 @@ Content-Type: application/json
 {"text":"<output.text>","voice_id":"gentle_female","voice":<output.voice>}
 ```
 
-**② 语音（按住说话）**
+**② 语音 — 对话模式（端侧推荐）**
+
+先经 **`WS /api/stt/stream`** 取得 `final.text` 与 `final.voice`，再调聊天（**不要**再传 `input.audio`）：
+
+```json
+{
+  "session_id": "sess-xxx",
+  "input": {
+    "text": "今天好累",
+    "skip_tts": true,
+    "voice_id": "gentle_female",
+    "perception": {
+      "facial_expression": "sad",
+      "identity": "小明",
+      "voice": { "tone": "低落", "intonation": "下沉", "speed": "慢" }
+    }
+  }
+}
+```
+
+其中 `perception.voice` 来自 STT `final.voice`（可与表情等感知字段并存）。推荐走 **`POST /api/chat/stream`**（§3.4.1）以降低首句 TTS 延迟。
+
+**②' 语音 — 批量上传（兼容 / 简易调试）**
+
+整段录完后一次性上传 WAV，服务端在 `/api/chat` 内完成 STT：
 
 ```json
 {
@@ -594,13 +665,41 @@ Content-Type: application/json
 |------|------|
 | 400 | 无有效输入（无文字、无音频、无非声音感知）；语音未启用却传了 `audio` |
 
+#### 3.4.1 流式聊天（对话模式推荐）
+
+**`POST /api/chat/stream`**
+
+请求体与 **`POST /api/chat`** 完全相同。响应用 **`application/x-ndjson`** 行流推送 LLM 生成过程，便于在完整 `output.text` 到达前按句开 TTS。
+
+**响应行类型：**
+
+| `type` | 说明 |
+|--------|------|
+| `speak` | `text` 为可按句提前 TTS 的片段；对话模式收到后应对每段调 `POST /api/tts/stream` |
+| `done` | `response` 为完整 `ChatResponse`（与 `/api/chat` 200 体相同） |
+| `error` | `message` 为错误说明（少见） |
+
+**示例（节选）：**
+
+```json
+{"type":"speak","text":"听起来你今天真的很累…"}
+{"type":"speak","text":"要不要休息一下？"}
+{"type":"done","response":{"robot_id":"robot-xxx","session_id":"sess-xxx","output":{"text":"听起来你今天真的很累…要不要休息一下？","robot_state":"idle",...},"stt":null,...}}
+```
+
+**客户端读取：** 使用 chunked 流（`curl -N`、OkHttp `BufferedReader`、Fetch `ReadableStream`），按行解析 JSON；**勿**等整段响应结束。
+
+**与对话模式配合：** STT `final` 后仅传 `input.text`（+ `perception`）；`input.audio` 应为空。`stt` 在 `done.response` 中为 `null`（识别已在 WS 阶段完成）。
+
 ---
 
 ### 3.5 语音识别
 
+#### 3.5.0 批量识别（兼容）
+
 **`POST /api/stt`**
 
-仅做 STT，不触发 LLM 对话。
+仅做 STT，不触发 LLM。整段 WAV 上传，适合一次性调试或简易集成。
 
 **请求：**
 
@@ -624,9 +723,124 @@ Content-Type: application/json
 }
 ```
 
-> `voice` 字段：`qwen3-asr-flash-realtime` 可从语音推断情感；识别失败时为 `null`。
+> `voice` 字段：`qwen3-asr-flash-realtime` 可从语音推断情感；识别失败或空结果时 `text` 为空、`voice` 为 `null`。
+
+也可通过 **`POST /api/chat`** 的 `input.audio` 在聊天时内联 STT（见 §3.4 ②'），响应 `stt` 字段回显识别结果。
 
 **错误：** `503` 语音未启用；`400` 识别失败。
+
+#### 3.5.1 流式识别（对话模式，推荐）
+
+**`WS /api/stt/stream`**
+
+用户**唤醒**后进入对话模式：麦克风在会话窗口内开启，通过 WebSocket 持续推送 PCM 分片；服务端回推 `partial` / `final`。一句结束后由客户端调 **`POST /api/chat/stream`**（仅 `text`）与 **`POST /api/tts/stream`**。
+
+**URL：** 将 `http(s)://<host>:<port>` 换为 `ws(s)://<host>:<port>/api/stt/stream`（路径与 HTTP API 同域同端口）。
+
+**连接：** 标准 WebSocket；载荷为 **JSON 文本帧**（非二进制）。`speech.enabled=false` 时服务端以 close code **1013** 拒绝连接。
+
+**客户端 → 服务端：**
+
+```json
+{"type": "start", "sample_rate": 16000, "language": "zh", "turn_detection": true}
+{"type": "chunk", "data": "<base64 PCM16 mono>"}
+{"type": "commit"}
+{"type": "end"}
+```
+
+| 消息 | 字段 | 说明 |
+|------|------|------|
+| `start` | `sample_rate` | 可选，默认 `speech.stt.sample_rate`（16000） |
+| `start` | `language` | 可选，默认 `speech.stt.language`（`zh`） |
+| `start` | `turn_detection` | 可选，省略时用 `speech.stt.turn_detection`（默认 `true`） |
+| `chunk` | `data` | **必填**，16-bit 小端单声道 PCM 的 Base64 |
+| `commit` | — | 手动结束当前一句；云侧已 `turn_detection` 时作端侧 VAD 兜底 |
+| `end` | — | 客户端主动退出对话模式（可选；空闲时也可等服务端 `session_end`） |
+
+**分片建议：** 每片约 **100ms**（16kHz 下 3200 字节 ≈ `speech.stt.chunk_bytes`），与批量 STT 内部分片一致。
+
+**服务端 → 客户端：**
+
+```json
+{"type": "meta", "sample_rate": 16000, "language": "zh", "turn_detection": true, "silence_commit_ms": 600, "conversation_idle_sec": 60, "encoding": "pcm16"}
+{"type": "ready"}
+{"type": "partial", "text": "你好"}
+{"type": "final", "text": "你好呀", "voice": {"tone": "兴奋", "intonation": "平稳", "speed": "正常"}}
+{"type": "session_end", "reason": "conversation_idle", "message": "长时间无有效对话，会话已结束", "conversation_idle_sec": 60}
+{"type": "error", "message": "..."}
+```
+
+| 消息 | 说明 |
+|------|------|
+| `meta` | 会话参数；含 `silence_commit_ms`、`conversation_idle_sec`（空闲超时秒数） |
+| `ready` | DashScope 会话已建立，可开始发 `chunk` |
+| `partial` | 中间识别结果，可驱动「聆听中」UI，**勿**直接触发 LLM；**会刷新**空闲计时 |
+| `final` | 当前一句定稿；`text` 为空时不刷新空闲计时；`text` 非空时视为有效对话并**刷新**空闲计时 |
+| `session_end` | 服务端主动结束会话（如空闲超时）；随后关闭 WebSocket；端侧应关麦并回到 `idle` |
+| `error` | 致命错误；客户端应关闭 WS 并提示 |
+
+**对话空闲超时（服务端主动回收）：**
+
+自 `ready`、最近一次 `partial`、或最近一次**有效** `final`（`text` 非空）起，若连续 **`conversation_idle_sec`**（默认 60s，见 `speech.stt.stream_conversation_idle_sec`）内既无 `partial` 也无有效 `final`，服务端推送：
+
+```json
+{"type": "session_end", "reason": "conversation_idle", "message": "长时间无有效对话，会话已结束", "conversation_idle_sec": 60}
+```
+
+然后关闭 WebSocket（close code **1000**）。典型场景：
+
+- 唤醒后用户一直不说话（仅有静音 `chunk`）
+- 一轮对话结束后长时间不再开口
+
+> **注意：** 持续上传 `chunk` **不能**阻止空闲回收；必须有语音识别侧的 `partial` 或有效 `final`。TTS 播放期间若暂停 `chunk` 上行，只要在超时窗口内恢复聆听即可。
+
+**句末判定（二选一或并用）：**
+
+1. **云侧 `turn_detection=true`（默认）：** 用户停顿后 DashScope 自动产出 `final`，端侧**无需**按键。
+2. **端侧 VAD 兜底：** 在收到过 `partial` 后，静音持续 ≥ `meta.silence_commit_ms`（默认 600ms）时发送 `commit`，以防云侧未断句。
+
+**多轮复用：** 同一 WebSocket 在对话模式内保持连接；每轮 `final` 后**不要**发 `end`，继续发 `chunk` 即可进入下一轮聆听。
+
+**与 LLM 衔接：** `final` 后构造 `ChatRequest`：
+
+```json
+{
+  "input": {
+    "text": "<final.text>",
+    "skip_tts": true,
+    "voice_id": "gentle_female",
+    "perception": {
+      "facial_expression": "neutral",
+      "identity": "小明",
+      "voice": <final.voice 或 null>
+    }
+  }
+}
+```
+
+**端侧 FSM 建议（对话模式内）：**
+
+| 阶段 | FSM | 端侧行为 |
+|------|-----|----------|
+| 唤醒 | `waking` → `listening` | `start` → 等 `ready` → 开麦发 `chunk` |
+| 用户说话 | `listening` | 显示 `partial`（可选） |
+| 句末 / `final` | `thinking` | 暂停上行 `chunk`，调 `/api/chat/stream` |
+| 机器人回复 | `speaking` | 对 `speak` 分句调 `/api/tts/stream`；**播完**再开麦 |
+| 退出对话 | `idle` / `sleeping` | 客户端发 `end` **或** 收到 `session_end` 后关麦 |
+
+> **当前版本限制：** TTS 播放期间客户端应**暂停**向 STT 发送 `chunk`（避免回声误识别）；**不支持**用户插话打断（barge-in）。播完后再回到 `listening`。
+
+**配置项（`config.yaml` → `speech.stt`）：**
+
+| 键 | 默认 | 说明 |
+|----|------|------|
+| `turn_detection` | `true` | 云侧自动断句 |
+| `silence_commit_ms` | `600` | 经 `meta` 下发给端侧的 VAD 兜底阈值（毫秒） |
+| `stream_conversation_idle_sec` | `60` | 无 partial/有效 final 时服务端主动 `session_end` 的秒数 |
+| `chunk_bytes` | `3200` | 服务端参考分片大小（端侧可按 ~100ms 对齐） |
+| `timeout` | `30` | 单会话超时（秒） |
+
+**错误：** WebSocket 层 `error` 消息；HTTP 升级失败时无连接。语音未启用时 close **1013**。
 
 ---
 
@@ -1230,24 +1444,24 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
 
 ## 4. 客户端集成要点
 
-### 4.1 Android
+### 4.1 Android（Demo / 参考实现）
 
 - Base URL 示例：`http://192.168.1.100:8000/`（末尾斜杠可有可无）
-- 录音：16kHz 单声道 PCM → WAV → Base64 → `input.audio`
-- **聊天 TTS（推荐）：**
-  1. `ChatInput.skip_tts = true` 调 `POST /api/chat`
-  2. 展示 `output.text` 后立刻 `POST /api/tts/stream`
-  3. 解析 NDJSON：`meta` 后收到 `chunk` 即用 `AudioTrack`（PCM 16-bit mono）写入播放
-- **兼容：** 若 `output.audio` 非空（未设 `skip_tts`），仍可用 `MediaPlayer` 播完整 MP3/WAV
-- 设置页配置 `voice_id`，写入 `ChatInput.voice_id` 与流式 TTS 请求的 `voice_id`
-- 流式请求体与 `TtsRequest` 相同：`text`、`voice`（取自 `output.voice`）、`voice_id`
-- 语音 STT 失败时 `output.text` 为空，应提示「未能识别语音」
+- **对话模式（推荐）：** 语音输入页切到麦克风模式 →「点击开始对话」
+  1. `WS /api/stt/stream`：`SttStreamClient` 连接后发 `start`，`ready` 后 `AudioRecorder.startStreaming` 推 `chunk`
+  2. `partial` 显示在输入条；`final` 后 `ConversationController` 切 `thinking`
+  3. `POST /api/chat/stream`（`text` + `perception.voice` 来自 STT）→ 每句 `speak` 调 `POST /api/tts/stream`
+  4. TTS 播完 → 回到聆听（同一 WS）；再点按钮发 `end` 退出，或等待服务端 `session_end`（空闲超时）
+- **批量语音（兼容）：** 16kHz WAV → Base64 → `input.audio`（Demo 已改为对话模式为主）
+- **聊天 TTS：** `skip_tts=true`；解析 NDJSON：`meta` 后 `chunk` → `AudioTrack`（PCM）
+- 设置页配置 `voice_id`；流式 STT 失败看 WS `error`；`final.text` 为空时继续聆听
+- 参考代码：`SttStreamClient.kt`、`ConversationController.kt`、`ChatStreamClient.kt`、`TtsStreamClient.kt`
+- **兼容：** `output.audio` 非空时仍可用 `MediaPlayer` 播 MP3/WAV
 - **首次激活欢迎语：**
-  1. `POST /api/session/new` 获取 `session_id`
-  2. `PUT /api/robots/{robot_id}/owner` 携带 `session_id`
-  3. 若 `is_new=true` 且 `welcome_message` 非空，展示并 `POST /api/tts/stream` 播放
-  4. 调用 `GET /api/proactive_messages` 将 `since_id` 对齐到 `last_id`，避免轮询重复
-- 主动消息：`GET /api/proactive_messages?since_id=<last>`，播放走 `/api/tts/stream`
+  1. `POST /api/session/new` → `PUT .../owner`（带 `session_id`）
+  2. `welcome_message` → `POST /api/tts/stream`
+  3. `GET /api/proactive_messages` 对齐 `since_id`
+- 主动消息：轮询 `proactive_messages`，播放走 `/api/tts/stream`
 
 ### 4.2 Web
 
@@ -1260,14 +1474,17 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
 
 ### 4.4 端侧（XBot）对接与 FSM 映射
 
-XBot 端侧在本地完成表情/身份/手势识别，把结果作为感知通道发给后端，再用后端回复驱动虚拟宠物：
+XBot 端侧在本地完成表情/身份/手势识别，把结果作为感知通道发给后端，再用后端回复驱动虚拟宠物。
+
+**麦克风策略：** **非常开麦**。平时仅摄像头等感知可后台运行；用户**唤醒**后才进入**对话模式**（开麦 + `WS /api/stt/stream`），退出对话后关麦。详见 §1.1、§3.5.1。
 
 **上行（端侧 → 后端）**
 
 - 表情：使用 §2.1 定义的 7 类标准 key（如 `happy`、`sad`、`surprise`）。
 - 身份（认识我）：放 `input.perception.identity`（喂大模型）；如需溯源回显另放顶层 `user_id`。
 - 手势：放 `input.perception.gesture.type`（见 §2.4 取值），已进入大模型。
-- 持续感知 / 主动陪伴：用 `POST /api/tick`（见 §3.7）周期上报在场/身份/表情/静默。
+- **语音（对话模式）：** `WS /api/stt/stream` 流式上行 PCM；`final` 后 `input.text` + `perception.voice` 调 `/api/chat/stream`。
+- 持续感知 / 主动陪伴：用 `POST /api/tick`（见 §3.7）周期上报在场/身份/表情/静默（**无需**常开麦克风）。
 
 **下行（后端 → 端侧虚拟宠物 FSM）**
 
@@ -1281,25 +1498,47 @@ XBot 端侧在本地完成表情/身份/手势识别，把结果作为感知通�
 | `sad` | `sleepy` |
 | `angry` / `disgust` / `fear` / `surprise` | `confused` |
 
-生命周期状态仍由端侧本地控制：等待后端响应时 `thinking`，录音中 `listening`，注视跟随沿用端侧主脸位置逻辑。
+**对话模式生命周期（端侧本地 FSM，与 `robot_state` 互补）：**
+
+| 状态 | 触发 |
+|------|------|
+| `sleeping` / `idle` / `gazing` | 平时；未在对话模式 |
+| `waking` | 用户唤醒（回座、注视+开口等，由产品定义） |
+| `listening` | WS `ready` 后开麦；显示 `partial` 可选 |
+| `thinking` | 收到 STT `final`，等待 `/api/chat/stream` |
+| `speaking` | TTS 播放中；**暂停** STT `chunk` 上行 |
+| 回到 `listening` | 一轮 TTS 结束，仍在对话模式内 |
+| `idle` / `sleeping` | 发 WS `end`、关麦，**或**收到 `session_end` 后关麦；静默超时由服务端 `stream_conversation_idle_sec` 控制 |
+
+`output.robot_state` 表示机器人**情绪/表情向**的互动姿态；上表为**会话相位**（是否在听、在想、在说），二者可同时使用（例如相位 `listening` + `robot_state` `idle`）。
 
 ---
 
 ## 5. 语音引擎说明
 
-| 能力 | 引擎 | 协议 | 对外 HTTP 接口 |
-|------|------|------|----------------|
-| STT | 阿里云 `qwen3-asr-flash-realtime` | WebSocket 实时识别 | `POST /api/stt`、`/api/chat`（`input.audio`） |
-| TTS | 阿里云 `cosyvoice-v3-flash` | **WebSocket 实时合成** | **`POST /api/tts/stream`（推荐）**、`POST /api/tts`、可选 `inline_tts` |
+| 能力 | 引擎 | 协议 | 对外接口 |
+|------|------|------|----------|
+| STT（对话模式） | 阿里云 `qwen3-asr-flash-realtime` | WebSocket 实时识别 | **`WS /api/stt/stream`（推荐）** |
+| STT（批量） | 同上 | 服务端内连 WS，对外 HTTP 一次上传 | `POST /api/stt`、`POST /api/chat`（`input.audio`） |
+| TTS | 阿里云 `cosyvoice-v3-flash` | WebSocket 实时合成 | **`POST /api/tts/stream`（推荐）**、`POST /api/tts`、可选 `inline_tts` |
+| LLM（对话模式） | 配置见 `llm.*` | HTTP 流式 | **`POST /api/chat/stream`（推荐）**、`POST /api/chat` |
 
-`GET /api/health` 的 `tts_engine` 为 `dashscope-realtime` 表示 TTS 已启用。
+`GET /api/health`：`tts_engine=dashscope-realtime` 表示 TTS 可用；`stt_stream=true` 表示流式 STT WebSocket 可用。
 
 `speech.enabled: false` 时：
 
-- `/api/chat` 仍可用，但无 STT/TTS，`output.audio` 为 `null`
-- `/api/stt`、`/api/tts`、`/api/tts/stream` 返回 `503`
+- `/api/chat`、`/api/chat/stream` 仍可用，但无 STT/TTS，`output.audio` 为 `null`
+- `/api/stt`、`WS /api/stt/stream`、`/api/tts`、`/api/tts/stream` 不可用（HTTP 503 或 WS 1013）
 
-### 5.1 客户端 TTS 策略（必读）
+### 5.1 客户端 STT 策略
+
+| 方式 | 首句延迟 | 适用 |
+|------|----------|------|
+| **`WS /api/stt/stream` + `/api/chat/stream`** | **低**（唤醒即建连，边说边识别） | **XBot / 端侧对话模式（推荐）** |
+| `POST /api/chat` + `input.audio` | 较高（说完再上传整段 WAV） | 简易调试、无 WebSocket 的环境 |
+| `POST /api/stt` 仅识别 | — | 测 STT、与 LLM 自行编排 |
+
+### 5.2 客户端 TTS 策略（必读）
 
 | 方式 | 首声延迟 | 适用 |
 |------|----------|------|
@@ -1324,7 +1563,8 @@ XBot 端侧在本地完成表情/身份/手势识别，把结果作为感知通�
 | 200 | 成功 |
 | 400 | 请求参数不合法、STT/TTS 处理失败 |
 | 404 | 资源不存在 |
-| 503 | 语音功能未启用 |
+| 503 | 语音功能未启用（HTTP 接口） |
+| WS **1013** | 语音功能未启用（`WS /api/stt/stream` 拒绝连接） |
 
 业务失败时（如 LLM 超时、STT 无结果），`/api/chat` 仍返回 **200**，`output.text` 为空字符串（静默），不会附带错误说明字段。
 
@@ -1352,10 +1592,20 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 # Schema
 curl http://127.0.0.1:8000/api/schema
 
+# 流式聊天（对话模式，-N 禁用缓冲）
+curl -N -X POST http://127.0.0.1:8000/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"text":"你好","skip_tts":true,"voice_id":"gentle_female"}}'
+
 # 流式 TTS（NDJSON 行流，-N 禁用缓冲）
 curl -N -X POST http://127.0.0.1:8000/api/tts/stream \
   -H "Content-Type: application/json" \
   -d '{"text":"你好，我是 Pophie","voice_id":"gentle_female"}'
+
+# 流式 STT（WebSocket，需 websocat 等工具；先 start，再发 chunk）
+# websocat -t ws://127.0.0.1:8000/api/stt/stream
+# 连接后发送：{"type":"start","sample_rate":16000}
+# 再发送：{"type":"chunk","data":"<base64 pcm>"} … {"type":"end"}
 
 # 批量 TTS（兼容，返回完整 MP3）
 curl -X POST http://127.0.0.1:8000/api/tts \

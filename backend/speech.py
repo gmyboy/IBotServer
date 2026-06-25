@@ -341,6 +341,194 @@ def _transcribe_dashscope(wav_bytes: bytes) -> SttResult:
     raise RuntimeError(f"STT 识别失败: {last_err}") from last_err
 
 
+def stt_stream_turn_detection() -> bool:
+    return bool(SPEECH_CFG.get("stt", {}).get("turn_detection", True))
+
+
+def stt_silence_commit_ms() -> int:
+    return int(SPEECH_CFG.get("stt", {}).get("silence_commit_ms", 600))
+
+
+def stt_stream_conversation_idle_sec() -> float:
+    """对话模式空闲上限：该时长内无 partial / 有效 final 则服务端主动结束会话。"""
+    return float(SPEECH_CFG.get("stt", {}).get("stream_conversation_idle_sec", 20))
+
+
+class SttStreamSession:
+    """DashScope 实时 STT 长会话：边收 PCM 边推 partial/final，对话模式内可多轮。"""
+
+    def __init__(
+        self,
+        *,
+        turn_detection: Optional[bool] = None,
+        sample_rate: Optional[int] = None,
+        language: Optional[str] = None,
+    ) -> None:
+        stt_cfg = SPEECH_CFG.get("stt", {})
+        self.turn_detection = (
+            turn_detection
+            if turn_detection is not None
+            else stt_stream_turn_detection()
+        )
+        self.sample_rate = int(sample_rate or stt_cfg.get("sample_rate", 16000))
+        self.language = language or stt_cfg.get("language", "zh")
+        self._stt_cfg = stt_cfg
+        self._event_queue: queue.Queue = queue.Queue()
+        self._conversation: Any = None
+        self._closed = False
+        self._connected = False
+        self._ready_at: float = 0.0
+        self._last_partial_at: float = 0.0
+        self._last_final_text_at: float = 0.0
+
+    def conversation_idle_sec(self) -> float:
+        return stt_stream_conversation_idle_sec()
+
+    def conversation_idle_expired(self) -> bool:
+        """自 ready / 最近 partial / 最近有效 final 起，超过空闲阈值。"""
+        if not self._connected or self._ready_at <= 0:
+            return False
+        ref = max(self._ready_at, self._last_partial_at, self._last_final_text_at)
+        return (time.time() - ref) >= self.conversation_idle_sec()
+
+    def conversation_idle_remaining_sec(self) -> float:
+        if not self._connected or self._ready_at <= 0:
+            return self.conversation_idle_sec()
+        ref = max(self._ready_at, self._last_partial_at, self._last_final_text_at)
+        return max(0.0, self.conversation_idle_sec() - (time.time() - ref))
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected and not self._closed
+
+    def start(self) -> None:
+        if not is_enabled():
+            raise RuntimeError("语音功能未启用 (speech.enabled=false)")
+
+        import dashscope
+        from dashscope.audio.qwen_omni import (
+            MultiModality, OmniRealtimeCallback, OmniRealtimeConversation,
+        )
+        from dashscope.audio.qwen_omni.omni_realtime import TranscriptionParams
+
+        api_key = _dashscope_api_key()
+        if not api_key:
+            raise RuntimeError("DashScope STT 未配置 API Key")
+
+        model = self._stt_cfg.get("model", "qwen3-asr-flash-realtime")
+        ws_url = self._stt_cfg.get("base_url")
+        outer = self
+
+        class _QwenAsrStreamCallback(OmniRealtimeCallback):
+            def on_event(self, message: Dict[str, Any]) -> None:
+                if not isinstance(message, dict) or outer._closed:
+                    return
+                evt = message.get("type")
+                if evt == "conversation.item.input_audio_transcription.text":
+                    partial = f"{message.get('text') or ''}{message.get('stash') or ''}"
+                    if partial.strip():
+                        outer._last_partial_at = time.time()
+                        outer._event_queue.put({
+                            "type": "partial",
+                            "text": partial.strip(),
+                        })
+                elif evt == "conversation.item.input_audio_transcription.completed":
+                    raw = (message.get("transcript") or "").strip()
+                    text, tagged_emotion = _strip_emotion_tags(raw)
+                    emotion = message.get("emotion") or tagged_emotion
+                    voice = _voice_from_emotion(emotion)
+                    if text:
+                        outer._last_final_text_at = time.time()
+                    outer._event_queue.put({
+                        "type": "final",
+                        "text": text,
+                        "voice": voice.model_dump() if voice else None,
+                    })
+                elif evt == "error":
+                    outer._event_queue.put({
+                        "type": "error",
+                        "message": message.get("message") or str(message),
+                    })
+
+        dashscope.api_key = api_key
+        callback = _QwenAsrStreamCallback()
+        conversation = OmniRealtimeConversation(
+            model=model,
+            callback=callback,
+            api_key=api_key,
+            url=ws_url,
+            headers={"OpenAI-Beta": "realtime=v1"},
+        )
+        conversation.connect()
+        conversation.update_session(
+            output_modalities=[MultiModality.TEXT],
+            enable_input_audio_transcription=True,
+            enable_turn_detection=self.turn_detection,
+            transcription_params=TranscriptionParams(
+                language=self.language,
+                sample_rate=self.sample_rate,
+                input_audio_format="pcm",
+            ),
+        )
+        time.sleep(float(self._stt_cfg.get("connect_delay_sec", 0.1)))
+        self._conversation = conversation
+        self._connected = True
+        self._ready_at = time.time()
+        idle_sec = self.conversation_idle_sec()
+        self._event_queue.put({
+            "type": "meta",
+            "sample_rate": self.sample_rate,
+            "language": self.language,
+            "turn_detection": self.turn_detection,
+            "silence_commit_ms": stt_silence_commit_ms(),
+            "conversation_idle_sec": idle_sec,
+            "encoding": "pcm16",
+        })
+        self._event_queue.put({"type": "ready"})
+        log.info(
+            "[speech] STT stream session started model=%s turn_detection=%s",
+            model, self.turn_detection,
+        )
+
+    def append_audio(self, pcm: bytes) -> None:
+        if self._closed or not self._connected or not pcm:
+            return
+        if self._conversation is None:
+            raise RuntimeError("STT 会话未启动")
+        self._conversation.append_audio(
+            base64.b64encode(pcm).decode("ascii"),
+        )
+
+    def commit(self) -> None:
+        if self._closed or not self._connected or self._conversation is None:
+            return
+        self._conversation.commit()
+
+    def get_event(self, timeout: float = 0.25) -> Optional[dict]:
+        try:
+            return self._event_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        conv = self._conversation
+        self._conversation = None
+        self._connected = False
+        if conv is not None:
+            try:
+                conv.end_session(timeout=int(self._stt_cfg.get("timeout", 30)))
+            except Exception:
+                pass
+            try:
+                conv.close()
+            except Exception:
+                pass
+        log.info("[speech] STT stream session closed")
+
+
 def transcribe(audio: AudioPayload) -> SttResult:
     if not is_enabled():
         raise RuntimeError("语音功能未启用 (speech.enabled=false)")

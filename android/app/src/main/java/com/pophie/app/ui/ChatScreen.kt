@@ -48,6 +48,7 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.fillMaxSize
+import com.pophie.app.audio.ConversationController
 import com.pophie.app.data.model.FacialExpression
 import com.pophie.app.viewmodel.ChatMessage
 import com.pophie.app.viewmodel.ChatViewModel
@@ -58,7 +59,6 @@ private val InputFieldBg = Color(0xFF2A2A38)
 private val InputFieldBgFocused = Color(0xFF32324A)
 private val Accent = Color(0xFF6C63FF)
 private val AccentDim = Color(0xFF4E47B8)
-private val RecordRed = Color(0xFFE53935)
 private val InputBarHeight = 48.dp
 private val InputBarCorner = 24.dp
 private val InputBarHorizontalPadding = 12.dp
@@ -101,6 +101,18 @@ fun ChatScreen(
                         if (state.isSpeaking) {
                             Text(
                                 text = "🔊 Pophie 正在说话…",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Accent,
+                            )
+                        } else if (state.conversationActive) {
+                            val phaseLabel = when (state.conversationPhase) {
+                                com.pophie.app.audio.ConversationController.Phase.LISTENING -> "🎧 对话中 · 聆听"
+                                com.pophie.app.audio.ConversationController.Phase.THINKING -> "🎧 对话中 · 思考"
+                                com.pophie.app.audio.ConversationController.Phase.SPEAKING -> "🎧 对话中 · 说话"
+                                else -> "🎧 对话中"
+                            }
+                            Text(
+                                text = phaseLabel,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Accent,
                             )
@@ -163,21 +175,22 @@ fun ChatScreen(
                 onSelectRobotAction = viewModel::selectRobotAction,
                 onSelectGesture = viewModel::selectGesture,
                 onSelectPosture = viewModel::selectPosture,
-                enabled = !sending && !state.isRecording,
+                enabled = !sending && !state.conversationActive,
                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
             )
 
             ChatInputBar(
                 inputMode = state.inputMode,
                 inputText = state.inputText,
-                isRecording = state.isRecording,
+                conversationActive = state.conversationActive,
+                conversationPhase = state.conversationPhase,
+                partialTranscript = state.partialTranscript,
                 sending = sending,
                 canSend = canSend,
                 onInputChange = viewModel::updateInputText,
                 onToggleMode = viewModel::toggleInputMode,
                 onSend = viewModel::send,
-                onStartRecording = viewModel::startRecording,
-                onStopRecording = viewModel::stopRecordingAndSend,
+                onToggleConversation = viewModel::toggleConversationMode,
             )
         }
     }
@@ -187,14 +200,15 @@ fun ChatScreen(
 private fun ChatInputBar(
     inputMode: InputMode,
     inputText: String,
-    isRecording: Boolean,
+    conversationActive: Boolean,
+    conversationPhase: ConversationController.Phase,
+    partialTranscript: String,
     sending: Boolean,
     canSend: Boolean,
     onInputChange: (String) -> Unit,
     onToggleMode: () -> Unit,
     onSend: () -> Unit,
-    onStartRecording: () -> Unit,
-    onStopRecording: () -> Unit,
+    onToggleConversation: () -> Unit,
 ) {
     Row(
         modifier = Modifier
@@ -209,7 +223,7 @@ private fun ChatInputBar(
     ) {
         IconButton(
             onClick = onToggleMode,
-            enabled = !sending && !isRecording,
+            enabled = !sending && !conversationActive,
             modifier = Modifier
                 .size(InputBarHeight)
                 .clip(CircleShape)
@@ -235,11 +249,12 @@ private fun ChatInputBar(
                     .weight(1f)
                     .height(InputBarHeight),
             )
-            InputMode.VOICE -> HoldToTalkButton(
-                isRecording = isRecording,
+            InputMode.VOICE -> ConversationModeButton(
+                active = conversationActive,
+                phase = conversationPhase,
+                partialTranscript = partialTranscript,
                 enabled = !sending,
-                onStartRecording = onStartRecording,
-                onStopRecording = onStopRecording,
+                onToggle = onToggleConversation,
                 modifier = Modifier
                     .weight(1f)
                     .height(InputBarHeight),
@@ -248,7 +263,7 @@ private fun ChatInputBar(
 
         FilledIconButton(
             onClick = onSend,
-            enabled = canSend,
+            enabled = canSend && !conversationActive,
             modifier = Modifier.size(InputBarHeight),
             shape = CircleShape,
             colors = IconButtonDefaults.filledIconButtonColors(
@@ -325,35 +340,33 @@ private fun ChatTextField(
 }
 
 @Composable
-private fun HoldToTalkButton(
-    isRecording: Boolean,
+private fun ConversationModeButton(
+    active: Boolean,
+    phase: ConversationController.Phase,
+    partialTranscript: String,
     enabled: Boolean,
-    onStartRecording: () -> Unit,
-    onStopRecording: () -> Unit,
+    onToggle: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val bg = when {
         !enabled -> InputFieldBg.copy(alpha = 0.5f)
-        isRecording -> RecordRed
+        active -> Accent
         else -> InputFieldBgFocused
+    }
+    val label = when {
+        !active -> "点击开始对话"
+        phase == ConversationController.Phase.THINKING -> "思考中…"
+        phase == ConversationController.Phase.SPEAKING -> "正在回复…"
+        partialTranscript.isNotBlank() -> partialTranscript
+        else -> "聆听中…"
     }
     InputSlotContainer(
         background = bg,
         contentAlignment = Alignment.Center,
         modifier = modifier.then(
-            if (enabled) {
-                Modifier.pointerInput(Unit) {
-                    detectTapGestures(
-                        onPress = {
-                            onStartRecording()
-                            tryAwaitRelease()
-                            onStopRecording()
-                        },
-                    )
-                }
-            } else {
-                Modifier
-            },
+            if (enabled) Modifier.pointerInput(Unit) {
+                detectTapGestures(onTap = { onToggle() })
+            } else Modifier,
         ),
     ) {
         Row(
@@ -361,14 +374,14 @@ private fun HoldToTalkButton(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.Center,
         ) {
-            if (isRecording) {
+            if (active && phase == ConversationController.Phase.LISTENING) {
                 CircularProgressIndicator(
                     modifier = Modifier.size(16.dp),
                     strokeWidth = 2.dp,
                     color = Color.White,
                 )
                 Spacer(Modifier.width(8.dp))
-            } else {
+            } else if (!active) {
                 Icon(
                     Icons.Default.Mic,
                     contentDescription = null,
@@ -378,9 +391,10 @@ private fun HoldToTalkButton(
                 Spacer(Modifier.width(6.dp))
             }
             Text(
-                text = if (isRecording) "松开发送" else "按住说话",
+                text = label,
                 color = if (enabled) Color.White else Color(0xFF7A7A90),
                 style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
             )
         }
     }

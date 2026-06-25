@@ -1,53 +1,140 @@
+# IBotServer 配置示例
+# 使用方法：复制本文件为 config.yaml，填入密钥后启动服务。
+# 敏感项也可通过环境变量覆盖（见各字段注释）；项目根目录 .env 会自动加载。
+# 部分 server 项（host/port）修改后需重启；多数 chat / speech / memory 项支持 Admin API 热更新。
+
+# ---------------------------------------------------------------------------
+# LLM：大语言模型（OpenAI 兼容协议，适配 DeepSeek / Moonshot / Ollama 等）
+# ---------------------------------------------------------------------------
 llm:
+  # API 基址（须含 /v1 后缀，如 DeepSeek、OpenAI 兼容网关）
   base_url: https://api.deepseek.com/v1
-  api_key: ""   # 或设置环境变量 LLM_API_KEY
+  # 模型 API Key；留空时可设置环境变量 LLM_API_KEY
+  api_key: ""
+  # 模型名称（如 deepseek-chat、gpt-4o 等）
   model: deepseek-chat
+  # HTTP 请求超时（秒）
   timeout: 60
+  # 通用对话采样温度（0~2，越高越发散；用于非结构化调用）
   temperature: 0.7
+  # 厂商扩展：DeepSeek 等支持的「思考链」模式
+  # type: disabled | enabled（enabled 时模型可能返回 reasoning 内容，部分接口会忽略）
   thinking:
     type: disabled
+  # 为 true 时 chat_json 等结构化输出强制 JSON 模式（response_format: json_object）
   json_mode: false
+  # 结构化对话（/api/chat 等 JSON 输出）专用温度，通常略低于 temperature 以保证格式稳定
   chat_temperature: 0.3
+
+# ---------------------------------------------------------------------------
+# memory：四层漏斗记忆系统（L1 感知 → L2 工作 → L3 偏好 → L4 固化）
+# 详见 backend/memory.py 与 docs/AI情感陪伴机器人记忆系统调研.md
+# ---------------------------------------------------------------------------
 memory:
+  # 单会话 L2 工作记忆条数上限（超出后旧条目不参与召回；Admin 可配，召回逻辑参考此值）
   l2_session_cap: 20
+  # L2→L3 下沉阈值：复合留存分 >= 此值时从工作记忆升为偏好记忆
+  # 留存分 = importance_weight * importance + emotion_weight * |emotion|
   l2_to_l3_importance: 0.55
+  # L3→L4 固化阈值：单条 importance 达此值，或与下项「印证次数」同时满足时升为长期记忆
   l3_to_l4_importance: 0.8
+  # L3 被新输入语义印证的累计次数，达到后升为 L4
   l3_to_l4_reinforce_count: 3
+  # 直跃 L4 阈值：LLM 判定极高重要性（身份、重大事件等）时跳过 L3 直接固化
   direct_l4_importance: 0.9
+  # 计算留存分时「重要性」的权重（0~1）
   importance_weight: 0.6
+  # 计算留存分时「情感强度 |emotion|」的权重（0~1）
   emotion_weight: 0.5
+  # 情感强度直跃 L4：|emotion| >= 此值时视为情感锚点，直接固化（正负情绪均算）
   emotion_direct_l4_intensity: 0.85
+  # 召回排序时情感强度的附加权重：score = importance + recall_emotion_weight * |emotion|
   recall_emotion_weight: 0.5
+
+# ---------------------------------------------------------------------------
+# server：HTTP 服务与 Admin
+# ---------------------------------------------------------------------------
 server:
+  # 监听地址（0.0.0.0 表示所有网卡；修改后需重启）
   host: 0.0.0.0
+  # 监听端口（修改后需重启）
   port: 8000
+  # 客户端省略 robot_id 时使用的默认机器人标识（不同 robot_id 记忆完全隔离）
   default_robot: default
-  admin_token: ""   # 或设置环境变量 ADMIN_TOKEN
+  # Admin API 鉴权 Token；非空时请求须带 Header X-Admin-Token
+  # 留空时可设置环境变量 ADMIN_TOKEN
+  admin_token: ""
+
+# ---------------------------------------------------------------------------
+# chat：对话行为（影响 /api/chat、/api/chat/stream 的延迟与上下文）
+# ---------------------------------------------------------------------------
 chat:
+  # true：记忆写入、提醒解析等副作用放后台线程，首包更快；
+  #      响应中 memory_flow、l1_frames 恒为 []（记忆仍在后台落库）
   defer_side_tasks: true
+  # true：未设 skip_tts 时在 /api/chat 响应内嵌完整 TTS（MP3，需等合成结束）；
+  # false 或客户端 skip_tts=true 时 output.audio 为 null，应走 POST /api/tts/stream（推荐，首声更低延迟）
   inline_tts: true
+  # 单次回复 LLM max_tokens 上限（限制长度以加快生成与 TTS）
   max_tokens: 200
+  # 注入 Prompt 的近期对话轮数（每轮 = 用户 + 助手各一条）
   recent_turns: 8
+  # 从 L4/L3/L2 召回注入 Prompt 的条数上限（各层分别截断后合并）
   recall_top_k: 5
+
+# ---------------------------------------------------------------------------
+# speech：语音（STT 识别 + TTS 合成，均依赖阿里云 DashScope）
+# 启用前须安装 dashscope 并配置 API Key；关闭后 STT/TTS 相关接口不可用
+# ---------------------------------------------------------------------------
 speech:
+  # 总开关；false 时跳过语音模块初始化
   enabled: true
   stt:
+    # DashScope 实时 ASR 模型（WebSocket 流式与批量 POST /api/stt 共用）
     model: qwen3-asr-flash-realtime
+    # 识别语种（如 zh、en、auto）
     language: zh
+    # 输入音频采样率（Hz）；流式 PCM chunk 与批量 WAV 须与此一致，常用 16000
     sample_rate: 16000
+    # 服务端向 DashScope 推送 PCM 的分片大小（字节）；16000Hz 下 3200 ≈ 100ms
     chunk_bytes: 3200
+    # WebSocket connect 后、开始推音频前的短暂等待（秒），避免会话未就绪
     connect_delay_sec: 0.1
+    # 流式 STT（WS /api/stt/stream）云侧自动断句；false 时依赖端侧 VAD + commit 消息
+    turn_detection: true
+    # 端侧 VAD 兜底：静音超过此毫秒且已有 partial 时，客户端可发 commit 结束当前句
+    # 该值会通过 WS meta 消息下发给客户端
+    silence_commit_ms: 600
+    # 对话空闲超时（秒）：自 ready / 最近 partial / 最近有效 final 起，
+    # 超时无新 partial 且无有效 final 时服务端主动 session_end 并关闭 WebSocket
+    stream_conversation_idle_sec: 60
+    # 单次 STT 识别超时（秒）
     timeout: 30
+    # DashScope 调用失败时的最大重试次数
     max_retries: 3
+    # 重试间隔（秒）
     retry_delay_sec: 1.0
+    # STT API Key（可选）；省略时使用 speech.tts.api_key 或环境变量 DASHSCOPE_API_KEY
+    # api_key: ""
   tts:
-    api_key: ""   # 或设置环境变量 DASHSCOPE_API_KEY
+    # DashScope API Key（STT 未单独配置时与此共用）；留空时可设置环境变量 DASHSCOPE_API_KEY
+    api_key: ""
+    # CosyVoice 实时合成 WebSocket 端点（北京地域；新加坡等地域须换对应 wss 地址）
     base_url: wss://dashscope.aliyuncs.com/api-ws/v1/inference
+    # TTS 模型（当前为 cosyvoice-v3-flash）
     model: cosyvoice-v3-flash
+    # POST /api/tts 与 inline_tts 内嵌音频的输出格式（如 mp3、wav）
     format: mp3
+    # POST /api/tts/stream 流式分片格式（推荐 pcm，便于边收边播）
     stream_format: pcm
+    # TTS 请求超时（秒）
     timeout: 30
+    # 默认音色 ID，须为 backend/speech.py 中 TTS_VOICES 的键（如 gentle_female）
+    # Admin 修改后立即生效，无需重启
     default_voice: gentle_female
+    # TTS 输出采样率（Hz）
     sample_rate: 22050
+    # DashScope 调用失败时的最大重试次数
     max_retries: 3
+    # 重试间隔（秒）
     retry_delay_sec: 1.0

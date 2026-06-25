@@ -1,5 +1,6 @@
 """FastAPI 入口：聊天 / 记忆查询 / 主动 tick / 语音 STT-TTS / 静态前端。"""
 from __future__ import annotations
+import asyncio
 import base64
 import json
 import logging
@@ -13,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -475,6 +476,7 @@ def health():
         "ok": True,
         "speech_enabled": speech.is_enabled(),
         "stt_engine": speech._stt_engine() if speech.is_enabled() else None,
+        "stt_stream": speech.is_enabled(),
         "tts_engine": speech.tts_engine() if speech.is_enabled() else None,
     }
 
@@ -598,6 +600,160 @@ def stt_api(req: SttRequest):
         return speech.transcribe(req.audio)
     except Exception as e:
         raise HTTPException(400, str(e)) from e
+
+
+@app.websocket("/api/stt/stream")
+async def stt_stream_ws(websocket: WebSocket):
+    """流式 STT：客户端 WebSocket 推送 PCM 分片，服务端回推 partial/final。"""
+    if not speech.is_enabled():
+        await websocket.close(code=1013, reason="speech disabled")
+        return
+
+    await websocket.accept()
+    session: Optional[speech.SttStreamSession] = None
+    pump_task: Optional[asyncio.Task] = None
+    idle_task: Optional[asyncio.Task] = None
+    stopped = False
+    shutdown = asyncio.Event()
+
+    async def _pump_events() -> None:
+        nonlocal stopped
+        assert session is not None
+        while not stopped and not shutdown.is_set():
+            evt = await asyncio.to_thread(session.get_event, 0.25)
+            if evt is None:
+                continue
+            await websocket.send_text(json.dumps(evt, ensure_ascii=False))
+            if evt.get("type") == "error":
+                stopped = True
+                shutdown.set()
+                break
+
+    async def _idle_watchdog() -> None:
+        nonlocal stopped
+        while not shutdown.is_set():
+            await asyncio.sleep(1.0)
+            if session is None or not session.is_connected:
+                continue
+            if session.conversation_idle_expired():
+                log.info(
+                    "[stt/stream] conversation idle timeout (%.0fs)",
+                    session.conversation_idle_sec(),
+                )
+                try:
+                    payload = {
+                        "type": "session_end",
+                        "reason": "conversation_idle",
+                        "message": "长时间无有效对话，会话已结束",
+                        "conversation_idle_sec": session.conversation_idle_sec(),
+                    }
+                    await websocket.send_text(
+                        json.dumps(payload, ensure_ascii=False),
+                    )
+                except Exception:
+                    pass
+                stopped = True
+                shutdown.set()
+                break
+
+    try:
+        while not shutdown.is_set():
+            try:
+                raw = await asyncio.wait_for(
+                    websocket.receive_text(), timeout=1.0,
+                )
+            except asyncio.TimeoutError:
+                continue
+
+            msg = json.loads(raw)
+            typ = msg.get("type")
+
+            if typ == "start":
+                if session is not None:
+                    await asyncio.to_thread(session.close)
+                if pump_task is not None:
+                    stopped = True
+                    pump_task.cancel()
+                    try:
+                        await pump_task
+                    except asyncio.CancelledError:
+                        pass
+                    stopped = False
+                if idle_task is not None:
+                    idle_task.cancel()
+                    try:
+                        await idle_task
+                    except asyncio.CancelledError:
+                        pass
+
+                session = speech.SttStreamSession(
+                    turn_detection=msg.get("turn_detection"),
+                    sample_rate=msg.get("sample_rate"),
+                    language=msg.get("language"),
+                )
+                await asyncio.to_thread(session.start)
+                shutdown.clear()
+                pump_task = asyncio.create_task(_pump_events())
+                idle_task = asyncio.create_task(_idle_watchdog())
+
+            elif typ == "chunk":
+                if session is None:
+                    err = {"type": "error", "message": "STT 会话未启动，请先发送 start"}
+                    await websocket.send_text(json.dumps(err, ensure_ascii=False))
+                    continue
+                data_b64 = msg.get("data") or ""
+                if not data_b64:
+                    continue
+                pcm = base64.b64decode(data_b64)
+                await asyncio.to_thread(session.append_audio, pcm)
+
+            elif typ == "commit":
+                if session is not None:
+                    await asyncio.to_thread(session.commit)
+
+            elif typ == "end":
+                break
+
+            else:
+                err = {"type": "error", "message": f"未知消息类型: {typ}"}
+                await websocket.send_text(json.dumps(err, ensure_ascii=False))
+
+    except WebSocketDisconnect:
+        log.info("[stt/stream] client disconnected")
+    except json.JSONDecodeError:
+        err = {"type": "error", "message": "无效 JSON"}
+        try:
+            await websocket.send_text(json.dumps(err, ensure_ascii=False))
+        except Exception:
+            pass
+    except Exception as e:
+        log.error("[stt/stream] 失败: %s", e)
+        try:
+            err = {"type": "error", "message": str(e)}
+            await websocket.send_text(json.dumps(err, ensure_ascii=False))
+        except Exception:
+            pass
+    finally:
+        stopped = True
+        shutdown.set()
+        if idle_task is not None:
+            idle_task.cancel()
+            try:
+                await idle_task
+            except asyncio.CancelledError:
+                pass
+        if pump_task is not None:
+            pump_task.cancel()
+            try:
+                await pump_task
+            except asyncio.CancelledError:
+                pass
+        if session is not None:
+            await asyncio.to_thread(session.close)
+        try:
+            await websocket.close(code=1000)
+        except Exception:
+            pass
 
 
 @app.post("/api/tts")
