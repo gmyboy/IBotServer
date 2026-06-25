@@ -313,6 +313,7 @@ class ChatResponse(BaseModel):
     l1_frames: List = []
     recalled: List = []
     scheduled_reminders: List = []
+    cancelled_reminders: List = []
 
 
 class SttRequest(BaseModel):
@@ -333,6 +334,7 @@ class TtsResponse(BaseModel):
 
 VALID_OWNER_GENDERS = frozenset({"male", "female", "other"})
 _BIRTHDAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_BIRTHDAY_SHORT_RE = re.compile(r"^\d{2}-\d{2}-\d{2}$")
 
 
 class OwnerProfile(BaseModel):
@@ -366,9 +368,14 @@ class OwnerProfile(BaseModel):
         if v is None or v == "":
             return None
         b = str(v).strip()
-        if not _BIRTHDAY_RE.match(b):
-            raise ValueError("birthday must be YYYY-MM-DD")
-        return b
+        if _BIRTHDAY_RE.match(b):
+            return b
+        if _BIRTHDAY_SHORT_RE.match(b):
+            yy, mm, dd = b.split("-")
+            year = int(yy)
+            century = 2000 if year <= 29 else 1900
+            return f"{century + year:04d}-{mm}-{dd}"
+        raise ValueError("birthday must be YYYY-MM-DD or YY-MM-DD")
 
 
 class OwnerProfilePutRequest(BaseModel):

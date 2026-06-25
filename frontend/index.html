@@ -618,6 +618,7 @@ async function refreshReminders(){
           ${cancelBtn}</div>
         <div class="summary">${escapeHtml(it.content)}</div>
         ${it.note?`<div class="tags"><span class="tag">备注 ${escapeHtml(it.note)}</span></div>`:''}
+        ${it.interval_minutes?`<div class="tags"><span class="tag">每 ${it.interval_minutes} 分钟 · 至 ${escapeHtml(it.repeat_until||'')}</span></div>`:''}
         ${it.fired_message?`<div class="summary" style="margin-top:6px;color:var(--muted)"><b>已说：</b>${escapeHtml(it.fired_message)}</div>`:''}`;
       sect.appendChild(c);
     });
@@ -858,8 +859,18 @@ async function send(){
     }
     if(r.scheduled_reminders?.length){
       const tip = el("div","recall");
-      tip.innerHTML = "已设定提醒：" + r.scheduled_reminders.map(s =>
-        `<span class="tag">@${escapeHtml(s.remind_at)} · ${escapeHtml(s.content)}</span>`
+      tip.innerHTML = "已设定提醒：" + r.scheduled_reminders.map(s => {
+        const recur = s.interval_minutes
+          ? ` · 每${s.interval_minutes}分钟至${escapeHtml(s.repeat_until||'')}` : '';
+        return `<span class="tag">@${escapeHtml(s.remind_at)} · ${escapeHtml(s.content)}${recur}</span>`;
+      }).join(' ');
+      $("chat").lastChild.appendChild(tip);
+      refreshReminders();
+    }
+    if(r.cancelled_reminders?.length){
+      const tip = el("div","recall");
+      tip.innerHTML = "已取消提醒：" + r.cancelled_reminders.map(s =>
+        `<span class="tag">#${s.id}</span>`
       ).join(' ');
       $("chat").lastChild.appendChild(tip);
       refreshReminders();

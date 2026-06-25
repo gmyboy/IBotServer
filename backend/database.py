@@ -69,6 +69,8 @@ CREATE TABLE IF NOT EXISTS reminders (
     fired_at TEXT,
     fired_message TEXT,                  -- 实际发出的提醒话语
     source_text TEXT,                    -- 触发本提醒的用户原话
+    interval_minutes INTEGER,            -- 周期性提醒间隔（分钟）；NULL=单次
+    repeat_until TEXT,                 -- 周期提醒截止时间（ISO8601）
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE INDEX IF NOT EXISTS idx_rem_status ON reminders(status, remind_at);
@@ -119,6 +121,18 @@ def _migrate_robot_id(conn: sqlite3.Connection) -> None:
         conn.execute(idx_sql)
 
 
+def _migrate_reminder_recurring(conn: sqlite3.Connection) -> None:
+    """幂等迁移：为 reminders 表添加周期性提醒字段。"""
+    for col, typedef in (
+        ("interval_minutes", "INTEGER"),
+        ("repeat_until", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE reminders ADD COLUMN {col} {typedef}")
+        except sqlite3.OperationalError:
+            pass
+
+
 def touch_robot(conn: sqlite3.Connection, robot_id: str) -> None:
     """注册或更新机器人最后活跃时间。"""
     now = _now_iso()
@@ -138,6 +152,7 @@ def init_db():
     with get_conn() as conn:
         conn.executescript(SCHEMA)
         _migrate_robot_id(conn)
+        _migrate_reminder_recurring(conn)
     # journal_mode 不能在事务内切换，须在独立连接上设置
     wal_conn = sqlite3.connect(DB_PATH)
     try:

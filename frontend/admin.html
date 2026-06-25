@@ -783,6 +783,7 @@ async function refreshReminders(){
           <span class="id">${escapeHtml(it.remind_at)}</span>${cancelBtn}</div>
         <div class="summary">${escapeHtml(it.content)}</div>
         ${it.note?`<div class="tags"><span class="tag">备注 ${escapeHtml(it.note)}</span></div>`:""}
+        ${it.interval_minutes?`<div class="tags"><span class="tag">每 ${it.interval_minutes} 分钟 · 至 ${escapeHtml(it.repeat_until||"")}</span></div>`:""}
         ${it.fired_message?`<div class="summary" style="margin-top:6px;color:var(--muted)"><b>已说：</b>${escapeHtml(it.fired_message)}</div>`:""}`;
       sect.appendChild(c);
     });

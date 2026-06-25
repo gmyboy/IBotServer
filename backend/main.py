@@ -45,7 +45,8 @@ from .memory import (
 )
 from .proactive import perceive_and_respond
 from .reminder import (
-    extract_reminders, schedule_reminders, list_reminders, cancel_reminder,
+    schedule_reminders, list_reminders, cancel_reminder,
+    process_user_reminder_intents,
     start_scheduler,
 )
 from .welcome import send_welcome_message
@@ -170,6 +171,23 @@ def _should_inline_tts(chat_input) -> bool:
     return bool(CHAT_CFG.get("inline_tts", True))
 
 
+def _format_reminder_side_effects(rem_result: dict) -> tuple[list, list]:
+    scheduled = [
+        {
+            "id": rid,
+            "remind_at": it["remind_at"],
+            "content": it["content"],
+            **({"interval_minutes": it["interval_minutes"],
+                "repeat_until": it["repeat_until"]}
+               if it.get("interval_minutes") else {}),
+        }
+        for rid, it in zip(rem_result.get("scheduled_ids", []),
+                           rem_result.get("scheduled", []))
+    ]
+    cancelled = [{"id": rid} for rid in rem_result.get("cancelled_ids", [])]
+    return scheduled, cancelled
+
+
 def _defer_chat_side_tasks(robot_id: str, session_id: str, user_text: str,
                            text: str, recent: list[dict],
                            user_id: str = "default") -> None:
@@ -178,10 +196,10 @@ def _defer_chat_side_tasks(robot_id: str, session_id: str, user_text: str,
             ingest_user_input(robot_id, session_id, user_text,
                               modality="text", recent_context=recent[:-1],
                               user_id=user_id)
-            rem_items = extract_reminders(text) if text else []
-            if rem_items:
-                schedule_reminders(robot_id, session_id, text, rem_items)
-            log.info("[chat.bg] 后台完成 reminders=%d", len(rem_items))
+            rem_result = process_user_reminder_intents(robot_id, session_id, text)
+            log.info("[chat.bg] 后台完成 reminders scheduled=%d cancelled=%d",
+                     len(rem_result.get("scheduled_ids", [])),
+                     len(rem_result.get("cancelled_ids", [])))
         except Exception:
             log.exception("[chat.bg] 后台任务失败")
 
@@ -302,7 +320,12 @@ SYSTEM_PROMPT = """你是 Pophie——一个温暖的桌面陪伴机器人。
 回应原则：
 - 不要复读记忆，而是融入语气与内容；
 - 短句、有温度、不审讯式追问；
-- 若长期记忆里有重要事件/边界/家庭成员，请优先尊重。"""
+- 若长期记忆里有重要事件/边界/家庭成员，请优先尊重。
+
+定时提醒：
+- 用户约定到点提醒或周期性提醒（如每隔 N 分钟喝水）时，后台会自动建提醒并在到点主动开口；
+- 用户要求停止/取消提醒时，后台会自动取消尚未触发的待提醒；
+- 你可以自然口吻确认已记下或已停止，实际调度由系统完成，不要编造未约定的提醒细节。"""
 
 
 def _owner_prompt_block(robot_id: str) -> str:
@@ -856,7 +879,7 @@ def chat_api(req: ChatRequest):
     defer_side = bool(CHAT_CFG.get("defer_side_tasks", True))
     t_llm = time.time()
     ingest_result = {"produced": [], "l1_frames": []}
-    rem_items: list = []
+    rem_result: dict = {"scheduled": [], "scheduled_ids": [], "cancelled_ids": []}
 
     if defer_side:
         output = _do_reply()
@@ -871,8 +894,8 @@ def chat_api(req: ChatRequest):
 
         def _do_reminders():
             if not text:
-                return []
-            return extract_reminders(text)
+                return {"scheduled": [], "scheduled_ids": [], "cancelled_ids": []}
+            return process_user_reminder_intents(robot_id, session_id, text)
 
         with ThreadPoolExecutor(max_workers=3) as pool:
             f_reply = pool.submit(_do_reply)
@@ -880,7 +903,7 @@ def chat_api(req: ChatRequest):
             f_rem = pool.submit(_do_reminders)
             output = f_reply.result()
             ingest_result = f_ingest.result()
-            rem_items = f_rem.result()
+            rem_result = f_rem.result()
 
     log.info("[chat] LLM %.0fms defer_side=%s", (time.time() - t_llm) * 1000, defer_side)
 
@@ -902,11 +925,7 @@ def chat_api(req: ChatRequest):
                              "output": output.model_dump()},
                    user_id=user_id)
 
-    rem_ids = schedule_reminders(robot_id, session_id, text, rem_items) if rem_items else []
-    scheduled = [
-        {"id": rid, "remind_at": it["remind_at"], "content": it["content"]}
-        for rid, it in zip(rem_ids, rem_items)
-    ]
+    scheduled, cancelled = _format_reminder_side_effects(rem_result)
 
     resp = ChatResponse(
         robot_id=robot_id,
@@ -920,6 +939,7 @@ def chat_api(req: ChatRequest):
                    "summary": m["summary"], "importance": m["importance"]}
                   for m in mems],
         scheduled_reminders=scheduled,
+        cancelled_reminders=cancelled,
     )
     return resp.model_dump()
 
