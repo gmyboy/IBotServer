@@ -5,6 +5,8 @@ import kotlin.math.sqrt
 /** 轻量能量 VAD：对话模式内静音超时后触发 STT commit（云侧 turn_detection 的端侧兜底）。 */
 object SpeechVad {
     const val SILENCE_MS = 600L
+    /** TTS/思考期间：近场语音持续该时长即触发 barge-in（毫秒）。 */
+    const val BARGE_IN_SPEECH_MS = 320L
     /** 近场说话阈值：过滤环境噪声与远场人声，与 [ListeningAudioProcessor] 噪声门一致。 */
     private const val MIN_SPEECH_RMS = 750.0
 

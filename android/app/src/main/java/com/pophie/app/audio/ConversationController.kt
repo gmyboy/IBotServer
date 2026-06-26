@@ -10,7 +10,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
- * 对话模式编排：唤醒后建立 STT 流 → 聆听 → final →（由 ViewModel 触发 chat/TTS）→ 继续聆听。
+ * 对话模式编排：流式 STT、barge-in（插话→聆听）、dismiss（厌烦拒听→待机）。
  */
 class ConversationController(
     private val context: Context,
@@ -22,6 +22,10 @@ class ConversationController(
         fun onPhase(phase: Phase)
         fun onPartial(text: String)
         fun onFinal(text: String, voice: VoiceProsody?)
+        /** 用户插话：停播并继续聆听。 */
+        fun onBargeIn()
+        /** 用户明确拒听/结束对话：停播并退出对话模式（待机，等下次唤醒）。 */
+        fun onConversationDismissed(text: String)
         fun onError(message: String)
         fun onSessionEnded(reason: String, message: String) {}
     }
@@ -38,10 +42,12 @@ class ConversationController(
     private var vadJob: Job? = null
     @Volatile private var active = false
     @Volatile private var ready = false
-    @Volatile private var paused = false
+    @Volatile private var phase = Phase.IDLE
     @Volatile private var hasPartial = false
     @Volatile private var awaitingFinal = false
     @Volatile private var lastSpeechAt = 0L
+    @Volatile private var speechBurstStart = 0L
+    @Volatile private var bargeInDone = false
     @Volatile private var silenceCommitMs = SpeechVad.SILENCE_MS
 
     fun isActive(): Boolean = active
@@ -49,9 +55,11 @@ class ConversationController(
     fun start() {
         if (active) return
         active = true
-        paused = false
+        phase = Phase.LISTENING
         hasPartial = false
         awaitingFinal = false
+        bargeInDone = false
+        speechBurstStart = 0L
         ListeningAudioProcessor.reset()
         callbacks.onPhase(Phase.LISTENING)
 
@@ -70,14 +78,30 @@ class ConversationController(
                 }
 
                 override fun onPartial(text: String) {
-                    hasPartial = text.isNotBlank()
-                    if (hasPartial) callbacks.onPartial(text)
+                    val trimmed = text.trim()
+                    if (trimmed.isBlank()) return
+                    if (ConversationDismissDetector.matches(trimmed)) {
+                        triggerDismissConversation(trimmed, "partial")
+                        return
+                    }
+                    hasPartial = true
+                    if (phase == Phase.SPEAKING || phase == Phase.THINKING) {
+                        triggerBargeIn("partial")
+                    }
+                    callbacks.onPartial(trimmed)
                 }
 
                 override fun onFinal(text: String, voice: VoiceProsody?) {
                     hasPartial = false
                     awaitingFinal = false
-                    if (!active || paused) return
+                    bargeInDone = false
+                    speechBurstStart = 0L
+                    if (!active) return
+                    val trimmed = text.trim()
+                    if (ConversationDismissDetector.matches(trimmed)) {
+                        triggerDismissConversation(trimmed, "final")
+                        return
+                    }
                     callbacks.onFinal(text, voice)
                 }
 
@@ -102,7 +126,7 @@ class ConversationController(
         if (!active) return
         active = false
         ready = false
-        paused = false
+        phase = Phase.IDLE
         vadJob?.cancel()
         vadJob = null
         recorder.stopStreaming()
@@ -112,33 +136,66 @@ class ConversationController(
     }
 
     fun setThinking() {
-        paused = true
+        phase = Phase.THINKING
         callbacks.onPhase(Phase.THINKING)
     }
 
     fun setSpeaking() {
-        paused = true
+        phase = Phase.SPEAKING
+        bargeInDone = false
+        speechBurstStart = 0L
         callbacks.onPhase(Phase.SPEAKING)
     }
 
-    /** LLM/TTS 结束后回到聆听（仍在对话模式内）。 */
     fun resumeListening() {
         if (!active) return
-        paused = false
+        phase = Phase.LISTENING
         hasPartial = false
         awaitingFinal = false
+        bargeInDone = false
+        speechBurstStart = 0L
         lastSpeechAt = System.currentTimeMillis()
         ListeningAudioProcessor.reset()
         callbacks.onPhase(Phase.LISTENING)
         callbacks.onPartial("")
     }
 
+    private fun triggerBargeIn(source: String) {
+        if (bargeInDone || phase == Phase.LISTENING || phase == Phase.IDLE) return
+        bargeInDone = true
+        phase = Phase.LISTENING
+        Log.d(TAG, "barge-in via $source")
+        callbacks.onBargeIn()
+        callbacks.onPhase(Phase.LISTENING)
+    }
+
+    private fun triggerDismissConversation(text: String, source: String) {
+        if (!active) return
+        Log.d(TAG, "dismiss conversation via $source text=$text")
+        callbacks.onConversationDismissed(text)
+        stop()
+    }
+
     private fun startMic() {
         val ok = recorder.startStreaming { rawChunk ->
-            if (!active || !ready || paused) return@startStreaming
-            if (SpeechVad.isSpeech(rawChunk)) {
-                lastSpeechAt = System.currentTimeMillis()
+            if (!active || !ready) return@startStreaming
+            val now = System.currentTimeMillis()
+            val isSpeech = SpeechVad.isSpeech(rawChunk)
+            if (isSpeech) {
+                lastSpeechAt = now
+                if (phase == Phase.SPEAKING || phase == Phase.THINKING) {
+                    if (speechBurstStart == 0L) {
+                        speechBurstStart = now
+                    } else if (now - speechBurstStart >= SpeechVad.BARGE_IN_SPEECH_MS) {
+                        triggerBargeIn("vad")
+                    }
+                } else {
+                    speechBurstStart = 0L
+                }
+            } else if (phase == Phase.LISTENING) {
+                speechBurstStart = 0L
             }
+
             sttClient?.sendChunk(ListeningAudioProcessor.process(rawChunk))
         }
         if (!ok) {
@@ -152,7 +209,7 @@ class ConversationController(
         vadJob = scope.launch {
             while (isActive && active) {
                 delay(100)
-                if (!ready || paused || !hasPartial || awaitingFinal) continue
+                if (!ready || phase != Phase.LISTENING || !hasPartial || awaitingFinal) continue
                 val silentMs = System.currentTimeMillis() - lastSpeechAt
                 if (silentMs >= silenceCommitMs) {
                     awaitingFinal = true

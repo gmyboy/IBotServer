@@ -69,7 +69,7 @@
   |<-- session_end（可选，空闲超时） -----|  → 服务端关 WS；端侧退出对话模式
 ```
 
-> **说明：** 对话模式**不**走 `input.audio` 批量上传；STT 与 LLM 解耦。`final.voice` 应写入 `input.perception.voice` 再调 `/api/chat/stream`，以便大模型与 TTS 感知用户语气。TTS 播放期间当前版本**不**支持用户插话打断（barge-in），播完再回到聆听。
+> **说明：** 对话模式**不**走 `input.audio` 批量上传；STT 与 LLM 解耦。`final.voice` 应写入 `input.perception.voice` 再调 `/api/chat/stream`。TTS 期间支持两类打断：**插话（barge-in）**停播并回到聆听；**拒听/结束对话（dismiss）**停播并退出对话模式回到待机（见 §3.5.1）。
 >
 > **会话回收：** 若 `meta.conversation_idle_sec` 内**无** `partial` 且**无**有效 `final`（`text` 非空），服务端会主动发 `session_end` 并关闭 WebSocket，**无需**客户端发 `end`。仅上传静音 `chunk` **不会**刷新该计时。
 
@@ -857,10 +857,18 @@ Content-Type: application/json
 | 唤醒 | `waking` → `listening` | `start` → 等 `ready` → 开麦发 `chunk` |
 | 用户说话 | `listening` | 显示 `partial`（可选） |
 | 句末 / `final` | `thinking` | 暂停上行 `chunk`，调 `/api/chat/stream` |
-| 机器人回复 | `speaking` | 对 `speak` 分句调 `/api/tts/stream`；**播完**再开麦 |
+| 机器人回复 | `speaking` | 对 `speak` 分句 TTS；**仍上行 `chunk`**，用户开口即 barge-in 停播 |
+| 用户拒听 | `idle` / `sleeping` | 端侧识别「别说了」「不想聊了」等 → 停播、关麦、**不调 LLM**，等下次唤醒 |
 | 退出对话 | `idle` / `sleeping` | 客户端发 `end` **或** 收到 `session_end` 后关麦 |
 
-> **当前版本限制：** TTS 播放期间客户端应**暂停**向 STT 发送 `chunk`（避免回声误识别）；**不支持**用户插话打断（barge-in）。播完后再回到 `listening`。
+> **打断分流（端侧即时处理）：**
+>
+> | 类型 | 典型语句 | 停播 | 下一状态 | 是否调 LLM |
+> |------|----------|------|----------|------------|
+> | **插话（barge-in）** | 用户开口打断、想接着说新内容 | 是 | `listening`（继续对话） | 否（等 `final` 后再调） |
+> | **拒听（dismiss）** | 「别说了」「闭嘴」「不想聊了」「安静点」等 | 是 | `idle` 待机（退出对话模式） | **否** |
+>
+> 检测时机：`partial` 或 `final` 命中拒听短语即 dismiss；TTS/思考中也可由 VAD + `partial` 触发 barge-in。参考实现：`ConversationDismissDetector.kt`。
 
 **配置项（`config.yaml` → `speech.stt`）：**
 
@@ -1483,11 +1491,11 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
   1. `WS /api/stt/stream`：`SttStreamClient` 连接后发 `start`，`ready` 后 `AudioRecorder.startStreaming` 推 `chunk`
   2. `partial` 显示在输入条；`final` 后 `ConversationController` 切 `thinking`
   3. `POST /api/chat/stream`（`text` + `perception.voice` 来自 STT）→ 每句 `speak` 调 `POST /api/tts/stream`
-  4. TTS 播完 → 回到聆听（同一 WS）；再点按钮发 `end` 退出，或等待服务端 `session_end`（空闲超时）
+  4. TTS 播完或用户 **barge-in** → 回到聆听；用户 **dismiss**（拒听）→ 直接待机；再点按钮 `end` 退出，或等待 `session_end`
 - **批量语音（兼容）：** 16kHz WAV → Base64 → `input.audio`（Demo 已改为对话模式为主）
 - **聊天 TTS：** `skip_tts=true`；解析 NDJSON：`meta` 后 `chunk` → `AudioTrack`（PCM）
 - 设置页配置 `voice_id`；流式 STT 失败看 WS `error`；`final.text` 为空时继续聆听
-- 参考代码：`SttStreamClient.kt`、`ConversationController.kt`、`ChatStreamClient.kt`、`TtsStreamClient.kt`
+- 参考代码：`SttStreamClient.kt`、`ConversationController.kt`、`ConversationDismissDetector.kt`、`ChatStreamClient.kt`、`TtsStreamClient.kt`
 - **兼容：** `output.audio` 非空时仍可用 `MediaPlayer` 播 MP3/WAV
 - **首次激活欢迎语：**
   1. `POST /api/session/new` → `PUT .../owner`（带 `session_id`）
@@ -1516,7 +1524,8 @@ XBot 端侧在本地完成表情/身份/手势识别，把结果作为感知通�
 - 身份（认识我）：放 `input.perception.identity`（喂大模型）；如需溯源回显另放顶层 `user_id`。
 - 手势：放 `input.perception.gesture.type`（见 §2.4 取值），已进入大模型。
 - **视觉（摄像头）：** 放 `input.perception.vision`（或根级 `scene` / `objects_detail`），与文字/STT 结果同一次 **`POST /api/chat`** 或 **`POST /api/chat/stream`** 请求上传；无用户文字时可单独调聊天接口，由 LLM 决定是否回应（见 §2.4）。
-- **语音（对话模式）：** `WS /api/stt/stream` 流式上行 PCM；`final` 后 `input.text` + `perception.voice` 调 `/api/chat/stream`。
+- **语音（对话模式）：** `WS /api/stt/stream` 流式上行 PCM；`final` 后 `input.text` + `perception`（**`identity`、`facial_expression`、`voice`** 等）调 `/api/chat/stream`。
+- **实时感知：** 端侧在对话模式内持续调用 `updateLivePerception(facialExpression, identity)`（Android Demo：`ChatViewModel.updateLivePerception`），每轮 `final` 时快照并入 `input.perception`。
 - 主动陪伴 tick：用 `POST /api/tick`（见 §3.7）周期上报时间/姿态/静默等**被动信号**（**不含**摄像头 `scene`/`objects_detail`，与聊天接口分工不同）。
 
 **下行（后端 → 端侧虚拟宠物 FSM）**
@@ -1539,9 +1548,9 @@ XBot 端侧在本地完成表情/身份/手势识别，把结果作为感知通�
 | `waking` | 用户唤醒（回座、注视+开口等，由产品定义） |
 | `listening` | WS `ready` 后开麦；显示 `partial` 可选 |
 | `thinking` | 收到 STT `final`，等待 `/api/chat/stream` |
-| `speaking` | TTS 播放中；**暂停** STT `chunk` 上行 |
+| `speaking` | TTS 播放中；**仍收 `chunk`**，用户说话触发 barge-in → `listening` |
 | 回到 `listening` | 一轮 TTS 结束，仍在对话模式内 |
-| `idle` / `sleeping` | 发 WS `end`、关麦，**或**收到 `session_end` 后关麦；静默超时由服务端 `stream_conversation_idle_sec` 控制 |
+| `idle` / `sleeping` | **dismiss**（拒听短语）、发 WS `end`、关麦，**或**收到 `session_end` 后关麦；静默超时由服务端 `stream_conversation_idle_sec` 控制 |
 
 `output.robot_state` 表示机器人**情绪/表情向**的互动姿态；上表为**会话相位**（是否在听、在想、在说），二者可同时使用（例如相位 `listening` + `robot_state` `idle`）。
 

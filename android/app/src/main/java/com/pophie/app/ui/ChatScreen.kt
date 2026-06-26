@@ -49,6 +49,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.layout.fillMaxSize
 import com.pophie.app.audio.ConversationController
+import com.pophie.app.audio.ConversationInterruptKind
+import com.pophie.app.audio.ConversationSessionFsm
 import com.pophie.app.data.model.FacialExpression
 import com.pophie.app.viewmodel.ChatMessage
 import com.pophie.app.viewmodel.ChatViewModel
@@ -88,6 +90,13 @@ fun ChatScreen(
         }
     }
 
+    LaunchedEffect(state.conversationStatusHint) {
+        if (state.conversationStatusHint != null) {
+            kotlinx.coroutines.delay(3500)
+            viewModel.clearConversationStatusHint()
+        }
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -106,15 +115,34 @@ fun ChatScreen(
                             )
                         } else if (state.conversationActive) {
                             val phaseLabel = when (state.conversationPhase) {
-                                com.pophie.app.audio.ConversationController.Phase.LISTENING -> "🎧 对话中 · 聆听"
-                                com.pophie.app.audio.ConversationController.Phase.THINKING -> "🎧 对话中 · 思考"
-                                com.pophie.app.audio.ConversationController.Phase.SPEAKING -> "🎧 对话中 · 说话"
+                                ConversationController.Phase.LISTENING -> {
+                                    if (state.lastInterruptKind == ConversationInterruptKind.BARGE_IN) {
+                                        "🎧 对话中 · 插话聆听"
+                                    } else {
+                                        "🎧 对话中 · 聆听"
+                                    }
+                                }
+                                ConversationController.Phase.THINKING -> "🎧 对话中 · 思考"
+                                ConversationController.Phase.SPEAKING -> "🎧 对话中 · 说话"
                                 else -> "🎧 对话中"
                             }
                             Text(
                                 text = phaseLabel,
                                 style = MaterialTheme.typography.labelSmall,
                                 color = Accent,
+                            )
+                            Text(
+                                text = "FSM: ${state.sessionFsmState}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF666680),
+                            )
+                        } else if (state.sessionFsmState != ConversationSessionFsm.IDLE ||
+                            state.conversationStatusHint != null
+                        ) {
+                            Text(
+                                text = "待机 · ${state.sessionFsmState}",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color(0xFF888888),
                             )
                         } else if (state.voiceLabel.isNotBlank()) {
                             Text(
@@ -145,6 +173,15 @@ fun ChatScreen(
                     text = state.error!!,
                     color = MaterialTheme.colorScheme.error,
                     modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp),
+                )
+            }
+
+            if (state.conversationStatusHint != null) {
+                Text(
+                    text = state.conversationStatusHint!!,
+                    color = Accent,
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp),
                 )
             }
 
@@ -184,6 +221,7 @@ fun ChatScreen(
                 inputText = state.inputText,
                 conversationActive = state.conversationActive,
                 conversationPhase = state.conversationPhase,
+                lastInterruptKind = state.lastInterruptKind,
                 partialTranscript = state.partialTranscript,
                 sending = sending,
                 canSend = canSend,
@@ -202,6 +240,7 @@ private fun ChatInputBar(
     inputText: String,
     conversationActive: Boolean,
     conversationPhase: ConversationController.Phase,
+    lastInterruptKind: ConversationInterruptKind?,
     partialTranscript: String,
     sending: Boolean,
     canSend: Boolean,
@@ -252,6 +291,7 @@ private fun ChatInputBar(
             InputMode.VOICE -> ConversationModeButton(
                 active = conversationActive,
                 phase = conversationPhase,
+                lastInterruptKind = lastInterruptKind,
                 partialTranscript = partialTranscript,
                 enabled = !sending,
                 onToggle = onToggleConversation,
@@ -343,6 +383,7 @@ private fun ChatTextField(
 private fun ConversationModeButton(
     active: Boolean,
     phase: ConversationController.Phase,
+    lastInterruptKind: ConversationInterruptKind?,
     partialTranscript: String,
     enabled: Boolean,
     onToggle: () -> Unit,
@@ -350,13 +391,17 @@ private fun ConversationModeButton(
 ) {
     val bg = when {
         !enabled -> InputFieldBg.copy(alpha = 0.5f)
+        active && phase == ConversationController.Phase.SPEAKING -> Color(0xFF5A4A8A)
+        active && lastInterruptKind == ConversationInterruptKind.BARGE_IN &&
+            phase == ConversationController.Phase.LISTENING -> Color(0xFF4A6A8A)
         active -> Accent
         else -> InputFieldBgFocused
     }
     val label = when {
         !active -> "点击开始对话"
         phase == ConversationController.Phase.THINKING -> "思考中…"
-        phase == ConversationController.Phase.SPEAKING -> "正在回复…"
+        phase == ConversationController.Phase.SPEAKING -> "正在回复…（开口可插话）"
+        lastInterruptKind == ConversationInterruptKind.BARGE_IN -> "插话聆听中…"
         partialTranscript.isNotBlank() -> partialTranscript
         else -> "聆听中…"
     }

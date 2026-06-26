@@ -28,12 +28,30 @@ http://<电脑局域网IP>:8000/
 
 ## 功能
 
-- 文字聊天 + 按住说话（需 `speech.enabled=true`）
+- 文字聊天 + **对话模式**（点击开始对话，流式 STT 多轮）
+- **插话（barge-in）**：机器人说话时用户开口 → 立即停播 → 继续聆听
+- **拒听（dismiss）**：用户说「别说了」「不想聊了」等 → 立即停播 → 退出对话 → 待机
 - 7 类面部表情选择
 - 自动播放机器人 TTS 回复
 - 首次激活后机器人主动自我介绍（欢迎语 + TTS）
 - 主动消息轮询（5 秒间隔）
 - `gesture` / `posture` 已在数据模型预留，UI 未实现
+
+## 对话模式接入（XBot）
+
+订阅 `ChatViewModel.conversationEvents` 或 `setConversationSessionListener`：
+
+| 事件 | 含义 | 端侧建议动作 |
+|------|------|--------------|
+| `Started` | 进入对话 | FSM → `waking`/`listening`，开麦 |
+| `PhaseChanged` | 相位变化 | 同步 `sessionFsmState` |
+| `BargeIn` | 用户插话 | 停 TTS，FSM → `listening`，**保持对话** |
+| `Dismissed` | 用户拒听 | 停 TTS，FSM → `idle`，**关麦关 WS** |
+| `Ended` | 会话结束 | 按 `reason` 处理（手动/超时/拒听） |
+
+实时感知：`ChatViewModel.updateLivePerception(facialExpression, identity)` 在对话中每帧更新，随 `final` 上传。
+
+参考：`ConversationSession.kt`、`ConversationController.kt`、`ConversationDismissDetector.kt`、`MainActivity.kt`（接入示例）。
 
 ## 权限
 
@@ -44,8 +62,7 @@ http://<电脑局域网IP>:8000/
 
 ```
 com.pophie.app/
-├── data/           # Retrofit API 与 JSON 模型
-├── audio/          # 录音与播放
+├── audio/          # STT/TTS、对话编排、插话/拒听检测
 ├── ui/             # Compose 界面
 └── viewmodel/      # 聊天状态管理
 ```

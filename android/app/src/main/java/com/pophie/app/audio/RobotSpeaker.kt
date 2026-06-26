@@ -14,8 +14,10 @@ import com.pophie.app.data.model.AudioPayload
 import com.pophie.app.data.model.VoiceProsody
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import kotlin.coroutines.coroutineContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import kotlin.coroutines.resume
@@ -83,6 +85,7 @@ class RobotSpeaker(context: Context) {
                         }
                     },
                     onChunk = { chunk ->
+                        coroutineContext.ensureActive()
                         if (pcmTrack != null) {
                             if (!playStarted) {
                                 playStarted = true

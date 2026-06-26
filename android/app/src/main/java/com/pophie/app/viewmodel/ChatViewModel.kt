@@ -9,6 +9,13 @@ import com.pophie.app.audio.AudioRecorder
 import com.pophie.app.audio.AudioRouteHelper
 import com.pophie.app.audio.ChatStreamClient
 import com.pophie.app.audio.ConversationController
+import com.pophie.app.audio.ConversationDismissDetector
+import com.pophie.app.audio.ConversationEndReason
+import com.pophie.app.audio.ConversationInterruptKind
+import com.pophie.app.audio.ConversationSessionEvent
+import com.pophie.app.audio.ConversationSessionFsm
+import com.pophie.app.audio.ConversationSessionListener
+import com.pophie.app.audio.UtterancePerception
 import com.pophie.app.data.ApiClient
 import com.pophie.app.data.PophieApi
 import com.pophie.app.data.model.AudioPayload
@@ -26,12 +33,16 @@ import com.pophie.app.data.model.RobotPosture
 import com.pophie.app.data.model.RobotState
 import com.pophie.app.data.model.TtsVoices
 import com.pophie.app.data.model.VoiceProsody
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
@@ -70,6 +81,12 @@ data class ChatUiState(
     val inputMode: InputMode = InputMode.TEXT,
     val conversationActive: Boolean = false,
     val conversationPhase: ConversationController.Phase = ConversationController.Phase.IDLE,
+    /** 对话会话相位 FSM（idle/waking/listening/thinking/speaking），供虚拟宠物/状态栏展示。 */
+    val sessionFsmState: String = ConversationSessionFsm.IDLE,
+    /** 最近一次打断类型（插话 / 拒听），对话结束后保留直至下次进入。 */
+    val lastInterruptKind: ConversationInterruptKind? = null,
+    /** 短提示文案（插话、拒听等），UI 可定时清除。 */
+    val conversationStatusHint: String? = null,
     val partialTranscript: String = "",
 )
 
@@ -82,9 +99,18 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
     private val _uiState = MutableStateFlow(ChatUiState())
     val uiState: StateFlow<ChatUiState> = _uiState.asStateFlow()
 
+    private val _conversationEvents = MutableSharedFlow<ConversationSessionEvent>(extraBufferCapacity = 16)
+    val conversationEvents: SharedFlow<ConversationSessionEvent> = _conversationEvents.asSharedFlow()
+
+    private var conversationSessionListener: ConversationSessionListener? = null
+
     private val recorder = AudioRecorder(app)
     private val speaker = RobotSpeaker(app)
     private var conversationController: ConversationController? = null
+    private var conversationSendJob: Job? = null
+    private var activeSpeakJob: Job? = null
+    @Volatile private var speakGeneration = 0
+    private var livePerception = UtterancePerception()
     private var msgId = 0L
     private var proactiveSinceId = 0L
     private var pollJob: Job? = null
@@ -282,6 +308,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             val next = if (state.selectedExpression == expr) null else expr
             state.copy(selectedExpression = next)
         }
+        if (_uiState.value.conversationActive) {
+            updateLivePerception(facialExpression = _uiState.value.selectedExpression?.key)
+        }
     }
 
     fun selectAction(action: BodyAction) {
@@ -330,6 +359,53 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         sendMessage(text = "", audioWav = wav)
     }
 
+    /** XBot 端侧：订阅对话生命周期（插话 / 拒听 / 相位），与 [conversationEvents] 等效。 */
+    fun setConversationSessionListener(listener: ConversationSessionListener?) {
+        conversationSessionListener = listener
+    }
+
+    fun clearConversationStatusHint() {
+        _uiState.update { it.copy(conversationStatusHint = null) }
+    }
+
+    private fun emitConversationEvent(event: ConversationSessionEvent) {
+        conversationSessionListener?.onConversationEvent(event)
+        viewModelScope.launch {
+            _conversationEvents.emit(event)
+        }
+    }
+
+    private fun updateSessionPhase(
+        phase: ConversationController.Phase,
+        hint: String? = null,
+        interruptKind: ConversationInterruptKind? = null,
+    ) {
+        val fsm = ConversationSessionFsm.fromPhase(phase)
+        _uiState.update {
+            it.copy(
+                conversationPhase = phase,
+                conversationActive = phase != ConversationController.Phase.IDLE,
+                sessionFsmState = fsm,
+                conversationStatusHint = hint ?: it.conversationStatusHint,
+                lastInterruptKind = interruptKind ?: it.lastInterruptKind,
+            )
+        }
+        emitConversationEvent(
+            ConversationSessionEvent.PhaseChanged(phase = phase, fsmState = fsm),
+        )
+    }
+
+    /** XBot 端侧：每帧/周期性更新当前身份与表情，随 utterance 一并上传。 */
+    fun updateLivePerception(
+        facialExpression: String? = null,
+        identity: String? = null,
+    ) {
+        livePerception = livePerception.copy(
+            facialExpression = facialExpression ?: livePerception.facialExpression,
+            identity = identity ?: livePerception.identity,
+        )
+    }
+
     /** 对话模式：唤醒后进入聆听，流式 STT + 多轮轮流对话。 */
     fun toggleConversationMode() {
         val state = _uiState.value
@@ -338,7 +414,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         if (state.conversationActive) {
-            exitConversationMode()
+            exitConversationMode(reason = ConversationEndReason.USER_TOGGLE)
         } else {
             enterConversationMode()
         }
@@ -348,23 +424,29 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         if (_uiState.value.conversationActive) return
         val app = getApplication<Application>()
         val baseUrl = ApiClient.getBaseUrl(app)
+        livePerception = UtterancePerception(
+            identity = ApiClient.getUserId(app)?.trim()?.ifBlank { null },
+        )
         val controller = ConversationController(
             context = app,
             baseUrl = baseUrl,
             scope = viewModelScope,
             callbacks = object : ConversationController.Callbacks {
                 override fun onPhase(phase: ConversationController.Phase) {
-                    _uiState.update {
-                        it.copy(
-                            conversationPhase = phase,
-                            conversationActive = phase != ConversationController.Phase.IDLE,
-                            error = null,
-                        )
-                    }
+                    updateSessionPhase(phase)
+                    _uiState.update { it.copy(error = null) }
                 }
 
                 override fun onPartial(text: String) {
                     _uiState.update { it.copy(partialTranscript = text) }
+                }
+
+                override fun onBargeIn() {
+                    handleBargeIn()
+                }
+
+                override fun onConversationDismissed(text: String) {
+                    handleConversationDismissed(dismissText = text)
                 }
 
                 override fun onFinal(text: String, voice: VoiceProsody?) {
@@ -376,44 +458,127 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
                 }
 
                 override fun onSessionEnded(reason: String, message: String) {
-                    _uiState.update {
-                        it.copy(
-                            conversationActive = false,
-                            conversationPhase = ConversationController.Phase.IDLE,
-                            partialTranscript = "",
-                            error = if (reason == "conversation_idle") {
-                                "对话已结束：$message"
-                            } else {
-                                message
-                            },
-                        )
+                    val endReason = if (reason == "conversation_idle") {
+                        ConversationEndReason.SESSION_IDLE
+                    } else {
+                        ConversationEndReason.ERROR
                     }
-                    conversationController = null
+                    val endMessage = if (reason == "conversation_idle") {
+                        "对话已结束：$message"
+                    } else {
+                        message
+                    }
+                    exitConversationMode(
+                        reason = endReason,
+                        endMessage = endMessage,
+                    )
                 }
             },
         )
         conversationController = controller
         controller.start()
+        emitConversationEvent(ConversationSessionEvent.Started())
         _uiState.update {
             it.copy(
                 conversationActive = true,
                 conversationPhase = ConversationController.Phase.LISTENING,
+                sessionFsmState = ConversationSessionFsm.LISTENING,
                 partialTranscript = "",
+                lastInterruptKind = null,
+                conversationStatusHint = null,
                 error = null,
             )
         }
     }
 
-    fun exitConversationMode() {
+    fun exitConversationMode(
+        reason: ConversationEndReason = ConversationEndReason.USER_TOGGLE,
+        userDismissed: Boolean = reason == ConversationEndReason.USER_DISMISSED,
+        endMessage: String? = null,
+    ) {
+        val wasActive = _uiState.value.conversationActive
+        conversationSendJob?.cancel()
+        conversationSendJob = null
+        cancelActiveSpeak()
         conversationController?.stop()
         conversationController = null
+        livePerception = UtterancePerception()
         _uiState.update {
             it.copy(
                 conversationActive = false,
                 conversationPhase = ConversationController.Phase.IDLE,
+                sessionFsmState = ConversationSessionFsm.IDLE,
                 partialTranscript = "",
+                isSpeaking = false,
+                error = when {
+                    userDismissed -> null
+                    reason == ConversationEndReason.SESSION_IDLE -> endMessage ?: "对话已结束"
+                    else -> it.error
+                },
             )
         }
+        if (wasActive) {
+            emitConversationEvent(
+                ConversationSessionEvent.Ended(reason = reason, message = endMessage),
+            )
+        }
+    }
+
+    private fun handleConversationDismissed(dismissText: String = "") {
+        handleBargeIn()
+        _uiState.update {
+            it.copy(
+                lastInterruptKind = ConversationInterruptKind.DISMISS,
+                conversationStatusHint = "已结束对话，等你下次唤醒",
+            )
+        }
+        emitConversationEvent(ConversationSessionEvent.Dismissed(text = dismissText))
+        exitConversationMode(
+            reason = ConversationEndReason.USER_DISMISSED,
+            userDismissed = true,
+        )
+    }
+
+    private fun handleBargeIn() {
+        speakGeneration++
+        conversationSendJob?.cancel()
+        conversationSendJob = null
+        cancelActiveSpeak()
+        _uiState.update {
+            it.copy(
+                isSpeaking = false,
+                pendingMessageId = null,
+                partialTranscript = "",
+                lastInterruptKind = ConversationInterruptKind.BARGE_IN,
+                conversationStatusHint = "已停下，请说…",
+                sessionFsmState = ConversationSessionFsm.LISTENING,
+            )
+        }
+        emitConversationEvent(ConversationSessionEvent.BargeIn)
+    }
+
+    private fun cancelActiveSpeak() {
+        activeSpeakJob?.cancel()
+        activeSpeakJob = null
+        speaker.stop()
+    }
+
+    private fun buildConversationPerception(sttVoice: VoiceProsody?): PerceptionInput? {
+        val app = getApplication<Application>()
+        val expr = livePerception.facialExpression
+            ?.let { FacialExpression.fromKey(it) }
+            ?: _uiState.value.selectedExpression
+        val identity = livePerception.identity?.trim()?.ifBlank { null }
+            ?: ApiClient.getUserId(app)?.trim()?.ifBlank { null }
+        return perceptionFor(
+            expression = expr,
+            action = null,
+            robotAction = null,
+            gesture = null,
+            posture = null,
+            identity = identity,
+            sttVoice = sttVoice,
+        )
     }
 
     private fun handleConversationFinal(text: String, voice: VoiceProsody?) {
@@ -422,14 +587,138 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
             conversationController?.resumeListening()
             return
         }
+        if (ConversationDismissDetector.matches(trimmed)) {
+            handleConversationDismissed(dismissText = trimmed)
+            return
+        }
         conversationController?.setThinking()
-        _uiState.update { it.copy(partialTranscript = trimmed) }
-        sendMessage(
+        _uiState.update {
+            it.copy(
+                partialTranscript = trimmed,
+                lastInterruptKind = null,
+                conversationStatusHint = null,
+            )
+        }
+        val perception = buildConversationPerception(voice)
+        val expr = livePerception.facialExpression
+            ?.let { FacialExpression.fromKey(it) }
+            ?: _uiState.value.selectedExpression
+        val identity = livePerception.identity
+            ?: ApiClient.getUserId(getApplication())?.trim()?.ifBlank { null }
+        sendConversationMessage(
             text = trimmed,
-            audioWav = null,
+            perception = perception,
+            displayExpression = expr,
+            displayIdentity = identity,
             sttVoice = voice,
-            isConversation = true,
         )
+    }
+
+    private fun sendConversationMessage(
+        text: String,
+        perception: PerceptionInput?,
+        displayExpression: FacialExpression?,
+        displayIdentity: String?,
+        sttVoice: VoiceProsody?,
+    ) {
+        val state = _uiState.value
+        if (state.robotId.isBlank()) return
+
+        val displayText = buildUserDisplay(
+            text = text,
+            expression = displayExpression,
+            action = null,
+            robotAction = null,
+            gesture = null,
+            posture = null,
+            identity = displayIdentity,
+            isVoice = true,
+        )
+        val userMsgId = ++msgId
+        _uiState.update {
+            it.copy(
+                messages = it.messages + ChatMessage(
+                    id = userMsgId,
+                    role = "user",
+                    text = displayText,
+                    expression = displayExpression?.key,
+                ),
+                pendingMessageId = userMsgId,
+                error = null,
+            )
+        }
+
+        conversationSendJob?.cancel()
+        val speakGen = speakGeneration
+        conversationSendJob = viewModelScope.launch {
+            try {
+                val app = getApplication<Application>()
+                withContext(Dispatchers.Main) {
+                    AudioRouteHelper.prepareForPlayback(app)
+                }
+                val userId = displayIdentity ?: ApiClient.getUserId(app)
+                val voiceId = ApiClient.getVoiceId(app)
+                val req = ChatRequest(
+                    robotId = state.robotId,
+                    userId = userId,
+                    sessionId = state.sessionId,
+                    input = ChatInput(
+                        text = text,
+                        audio = null,
+                        perception = perception,
+                        voiceId = voiceId,
+                        skipTts = true,
+                    ),
+                )
+                if (speakGen != speakGeneration) return@launch
+                conversationController?.setSpeaking()
+                val resp = ChatStreamClient(ApiClient.getBaseUrl(app)).stream(req) { chunk ->
+                    if (speakGen != speakGeneration) return@stream
+                    ChatStreamClient.logSpeak(chunk)
+                    speakChunk(chunk, voiceId = voiceId, generation = speakGen)
+                }
+                if (speakGen != speakGeneration) return@launch
+                ApiClient.saveSessionId(app, resp.sessionId)
+                val output = resp.output
+                val hasReply = output.text.isNotBlank()
+                _uiState.update {
+                    val newMessages = if (hasReply) {
+                        it.messages + ChatMessage(
+                            id = ++msgId,
+                            role = "assistant",
+                            text = output.text,
+                            expression = output.facialExpression,
+                            stateLabel = stateLabelFor(output),
+                            voiceLabel = voiceLabel(output.voice),
+                            timbreLabel = TtsVoices.labelFor(voiceId),
+                        )
+                    } else {
+                        it.messages
+                    }
+                    it.copy(
+                        sessionId = resp.sessionId,
+                        messages = newMessages,
+                        pendingMessageId = null,
+                        error = null,
+                    )
+                }
+            } catch (_: CancellationException) {
+                // barge-in 打断，静默忽略
+            } catch (e: Exception) {
+                if (speakGen == speakGeneration) {
+                    _uiState.update {
+                        it.copy(pendingMessageId = null, error = "发送失败：${e.message}")
+                    }
+                }
+            } finally {
+                if (speakGen == speakGeneration &&
+                    _uiState.value.conversationActive
+                ) {
+                    _uiState.update { it.copy(partialTranscript = "") }
+                    conversationController?.resumeListening()
+                }
+            }
+        }
     }
 
     /** 发送：有文字发文字，有感知信号则附带，仅感知信号也可单独发送。 */
@@ -454,9 +743,11 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         robotAction: RobotAction?,
         gesture: RobotGesture?,
         posture: RobotPosture?,
+        identity: String? = null,
         isVoice: Boolean,
     ): String {
         val tags = buildList {
+            identity?.trim()?.takeIf { it.isNotBlank() }?.let { add("👤$it") }
             expression?.let { add("${it.emoji}${it.label}") }
             action?.let { add("${it.emoji}${it.label}") }
             robotAction?.let { add("${it.emoji}${it.label}") }
@@ -528,15 +819,26 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
         text: String,
         voice: VoiceProsody? = null,
         voiceId: String = ApiClient.getVoiceId(getApplication()),
+        generation: Int = speakGeneration,
     ) {
+        if (generation != speakGeneration) return
         speakMutex.withLock {
+            if (generation != speakGeneration) return
             speaker.speak(
                 text = text,
                 serverAudio = null,
                 voice = voice,
                 voiceId = voiceId,
-                onStart = { _uiState.update { it.copy(isSpeaking = true) } },
-                onComplete = { _uiState.update { it.copy(isSpeaking = false) } },
+                onStart = {
+                    if (generation == speakGeneration) {
+                        _uiState.update { it.copy(isSpeaking = true) }
+                    }
+                },
+                onComplete = {
+                    if (generation == speakGeneration) {
+                        _uiState.update { it.copy(isSpeaking = false) }
+                    }
+                },
             )
         }
     }
@@ -595,7 +897,9 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
         val isVoice = hasAudio || (isConversation && text.isNotBlank())
         val displayText = buildUserDisplay(
-            text, expression, action, robotAction, gesture, posture, isVoice,
+            text, expression, action, robotAction, gesture, posture,
+            identity = null,
+            isVoice = isVoice,
         )
 
         val userMsgId = ++msgId
