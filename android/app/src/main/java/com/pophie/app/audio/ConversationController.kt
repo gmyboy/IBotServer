@@ -49,6 +49,9 @@ class ConversationController(
     @Volatile private var speechBurstStart = 0L
     @Volatile private var bargeInDone = false
     @Volatile private var silenceCommitMs = SpeechVad.SILENCE_MS
+    @Volatile private var inSpeechSegment = false
+    private var speechStreak = 0
+    private var silenceStreak = 0
 
     fun isActive(): Boolean = active
 
@@ -60,6 +63,7 @@ class ConversationController(
         awaitingFinal = false
         bargeInDone = false
         speechBurstStart = 0L
+        resetSpeechSegment()
         ListeningAudioProcessor.reset()
         callbacks.onPhase(Phase.LISTENING)
 
@@ -80,6 +84,7 @@ class ConversationController(
                 override fun onPartial(text: String) {
                     val trimmed = text.trim()
                     if (trimmed.isBlank()) return
+                    if (!inSpeechSegment || SttNoiseFilter.isLikelyNoise(trimmed)) return
                     if (ConversationDismissDetector.matches(trimmed)) {
                         triggerDismissConversation(trimmed, "partial")
                         return
@@ -98,6 +103,10 @@ class ConversationController(
                     speechBurstStart = 0L
                     if (!active) return
                     val trimmed = text.trim()
+                    if (SttNoiseFilter.isLikelyNoise(trimmed)) {
+                        resumeListening()
+                        return
+                    }
                     if (ConversationDismissDetector.matches(trimmed)) {
                         triggerDismissConversation(trimmed, "final")
                         return
@@ -129,6 +138,7 @@ class ConversationController(
         phase = Phase.IDLE
         vadJob?.cancel()
         vadJob = null
+        resetSpeechSegment()
         recorder.stopStreaming()
         sttClient?.close()
         sttClient = null
@@ -154,10 +164,33 @@ class ConversationController(
         awaitingFinal = false
         bargeInDone = false
         speechBurstStart = 0L
+        resetSpeechSegment()
         lastSpeechAt = System.currentTimeMillis()
         ListeningAudioProcessor.reset()
         callbacks.onPhase(Phase.LISTENING)
         callbacks.onPartial("")
+    }
+
+    private fun resetSpeechSegment() {
+        inSpeechSegment = false
+        speechStreak = 0
+        silenceStreak = 0
+    }
+
+    private fun updateSpeechSegment(isSpeech: Boolean) {
+        if (isSpeech) {
+            speechStreak++
+            silenceStreak = 0
+            if (speechStreak >= SpeechVad.MIN_SPEECH_CHUNKS) {
+                inSpeechSegment = true
+            }
+        } else {
+            silenceStreak++
+            speechStreak = 0
+            if (silenceStreak >= SpeechVad.MIN_SILENCE_CHUNKS) {
+                inSpeechSegment = false
+            }
+        }
     }
 
     private fun triggerBargeIn(source: String) {
@@ -180,8 +213,8 @@ class ConversationController(
         val ok = recorder.startStreaming { rawChunk ->
             if (!active || !ready) return@startStreaming
             val now = System.currentTimeMillis()
-            val isSpeech = SpeechVad.isSpeech(rawChunk)
-            if (isSpeech) {
+            updateSpeechSegment(SpeechVad.isSpeech(rawChunk))
+            if (inSpeechSegment) {
                 lastSpeechAt = now
                 if (phase == Phase.SPEAKING || phase == Phase.THINKING) {
                     if (speechBurstStart == 0L) {
@@ -196,7 +229,9 @@ class ConversationController(
                 speechBurstStart = 0L
             }
 
-            sttClient?.sendChunk(ListeningAudioProcessor.process(rawChunk))
+            ListeningAudioProcessor.process(rawChunk)?.let { chunk ->
+                sttClient?.sendChunk(chunk)
+            }
         }
         if (!ok) {
             callbacks.onError("无法启动麦克风")

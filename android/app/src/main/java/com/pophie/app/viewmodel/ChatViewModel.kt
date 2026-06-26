@@ -15,6 +15,7 @@ import com.pophie.app.audio.ConversationInterruptKind
 import com.pophie.app.audio.ConversationSessionEvent
 import com.pophie.app.audio.ConversationSessionFsm
 import com.pophie.app.audio.ConversationSessionListener
+import com.pophie.app.audio.SttNoiseFilter
 import com.pophie.app.audio.UtterancePerception
 import com.pophie.app.data.ApiClient
 import com.pophie.app.data.PophieApi
@@ -583,7 +584,7 @@ class ChatViewModel(app: Application) : AndroidViewModel(app) {
 
     private fun handleConversationFinal(text: String, voice: VoiceProsody?) {
         val trimmed = text.trim()
-        if (trimmed.isBlank()) {
+        if (trimmed.isBlank() || SttNoiseFilter.isLikelyNoise(trimmed)) {
             conversationController?.resumeListening()
             return
         }

@@ -4,6 +4,8 @@ import android.content.Context
 import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.NoiseSuppressor
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -77,6 +79,7 @@ class AudioRecorder(
         }
         if (recorder?.state != AudioRecord.STATE_INITIALIZED) return false
 
+        attachCaptureEffects(recorder!!)
         this.onChunk = onChunk
         buffer.reset()
         recording = true
@@ -120,6 +123,16 @@ class AudioRecorder(
         recorder = null
         AudioRouteHelper.restoreAfterRecording(context.applicationContext)
         return pcmToWav(buffer.toByteArray(), sampleRate)
+    }
+
+    private fun attachCaptureEffects(record: AudioRecord) {
+        val sessionId = record.audioSessionId
+        if (NoiseSuppressor.isAvailable()) {
+            NoiseSuppressor.create(sessionId)?.enabled = true
+        }
+        if (AcousticEchoCanceler.isAvailable()) {
+            AcousticEchoCanceler.create(sessionId)?.enabled = true
+        }
     }
 
     companion object {

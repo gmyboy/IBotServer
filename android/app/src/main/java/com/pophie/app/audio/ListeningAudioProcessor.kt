@@ -3,10 +3,9 @@ package com.pophie.app.audio
 /**
  * 对话聆听增强：噪声门过滤环境/远场人声，AGC 提升近场说话音量，供 STT 使用。
  * VAD 仍应在原始 PCM 上判断（见 [ConversationController]）。
+ * 低于门限时返回 null，调用方不应向云端发送该 chunk。
  */
 object ListeningAudioProcessor {
-    /** 低于此 RMS 视为环境噪声或远场人声，输出静音。 */
-    private const val GATE_THRESHOLD = 750.0
     private const val TARGET_RMS = 4800.0
     private const val MIN_GAIN = 1.3
     private const val MAX_GAIN = 7.0
@@ -25,13 +24,13 @@ object ListeningAudioProcessor {
         hpPrevOut = 0.0
     }
 
-    fun process(pcm16: ByteArray): ByteArray {
-        if (pcm16.size < 2) return pcm16
+    fun process(pcm16: ByteArray): ByteArray? {
+        if (pcm16.size < 2) return null
 
         val rms = SpeechVad.rmsPcm16(pcm16)
-        if (rms < GATE_THRESHOLD) {
+        if (rms < SpeechVad.MIN_SPEECH_RMS) {
             smoothedGain += (1.0 - smoothedGain) * GAIN_RELEASE
-            return ByteArray(pcm16.size)
+            return null
         }
 
         val targetGain = (TARGET_RMS / rms).coerceIn(MIN_GAIN, MAX_GAIN)
