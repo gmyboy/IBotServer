@@ -220,7 +220,27 @@ while (true) {
   "touch": "摸头",
   "identity": "小明",
   "gesture": { "type": "wave" },
-  "posture": null
+  "posture": null,
+  "vision": {
+    "objects_detail": [
+      {
+        "name": "盆栽",
+        "confidence": 0.45,
+        "location": "画面下左方",
+        "box": [0.029, 0.688, 0.101, 0.761]
+      }
+    ],
+    "scene": "画面中可见：盆栽（画面下左方，识别置信度45%）；克俭有些走神、东张西望"
+  }
+}
+```
+
+也可在 `perception` 根级直接传 `scene` / `objects_detail`（与 `vision` 对象等价）：
+
+```json
+{
+  "scene": "画面中可见：盆栽（画面下左方，识别置信度45%）",
+  "objects_detail": [{ "name": "盆栽", "confidence": 0.45, "location": "画面下左方" }]
 }
 ```
 
@@ -232,6 +252,18 @@ while (true) {
 | `identity` | 端侧身份识别到的人名，如 `小明`。**仅作为感知上下文喂给大模型**（可个性化称呼），记忆仍按 `robot_id` 隔离，不分人。也可传 `{ "name": "小明", "confidence": 0.9 }`，服务端取 `name` |
 | `gesture` | 手势对象，**现已进入大模型**，见下方 |
 | `posture` | 体姿态对象（预留，暂不进入 LLM），见下方 |
+| `vision` | 摄像头视觉感知，见下方；根级 `scene` / `objects_detail` 与之等价 |
+
+**`vision` 对象结构：**
+
+| 字段 | 说明 |
+|------|------|
+| `scene` | 场景自然语言描述（优先送入 LLM） |
+| `objects_detail` | 检测目标列表，每项含 `name`、`confidence`、`location`、`box`（归一化 0–1 坐标） |
+
+> **无新增接口：** 视觉感知与表情/手势一样，随 **`POST /api/chat`**、**`POST /api/chat/stream`** 的 `input.perception` 一并上传即可；请求体、响应体与其它聊天调用完全相同，**不要**另开专用上传接口，也**不要**走 `POST /api/tick`（tick 用于主动陪伴决策，不含 LLM 对话上下文）。
+
+> 仅视觉感知、无用户文字时：服务端拼为 `[视觉感知 画面:…]` 喂给 LLM；**机器人默认保持沉默**，由大模型判断是否有自然互动契机；`output.text` 为空即不回应。
 
 **`gesture` / `posture` 对象结构：**
 
@@ -275,7 +307,7 @@ while (true) {
 
 1. 非空 `text`
 2. 带 `data` 的 `audio`（且 `speech.enabled=true`）
-3. `perception` 中至少一项非声音感知（表情、抚摸等）
+3. `perception` 中至少一项感知（表情、抚摸、**画面**等）
 
 > 纯表情/抚摸、无文字时：不要传 `voice` 侧道字段，服务端会忽略。
 
@@ -1483,8 +1515,9 @@ XBot 端侧在本地完成表情/身份/手势识别，把结果作为感知通�
 - 表情：使用 §2.1 定义的 7 类标准 key（如 `happy`、`sad`、`surprise`）。
 - 身份（认识我）：放 `input.perception.identity`（喂大模型）；如需溯源回显另放顶层 `user_id`。
 - 手势：放 `input.perception.gesture.type`（见 §2.4 取值），已进入大模型。
+- **视觉（摄像头）：** 放 `input.perception.vision`（或根级 `scene` / `objects_detail`），与文字/STT 结果同一次 **`POST /api/chat`** 或 **`POST /api/chat/stream`** 请求上传；无用户文字时可单独调聊天接口，由 LLM 决定是否回应（见 §2.4）。
 - **语音（对话模式）：** `WS /api/stt/stream` 流式上行 PCM；`final` 后 `input.text` + `perception.voice` 调 `/api/chat/stream`。
-- 持续感知 / 主动陪伴：用 `POST /api/tick`（见 §3.7）周期上报在场/身份/表情/静默（**无需**常开麦克风）。
+- 主动陪伴 tick：用 `POST /api/tick`（见 §3.7）周期上报时间/姿态/静默等**被动信号**（**不含**摄像头 `scene`/`objects_detail`，与聊天接口分工不同）。
 
 **下行（后端 → 端侧虚拟宠物 FSM）**
 
@@ -1588,6 +1621,11 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 curl -X POST http://127.0.0.1:8000/api/chat \
   -H "Content-Type: application/json" \
   -d '{"input":{"text":"","perception":{"facial_expression":"happy"},"skip_tts":true}}'
+
+# 仅视觉感知（同一聊天接口，无新 endpoint；output.text 可能为空即沉默）
+curl -X POST http://127.0.0.1:8000/api/chat/stream \
+  -H "Content-Type: application/json" \
+  -d '{"input":{"text":"","skip_tts":true,"perception":{"scene":"画面中可见：盆栽；克俭有些走神","objects_detail":[{"name":"盆栽","confidence":0.45,"location":"画面下左方"}]}}}'
 
 # Schema
 curl http://127.0.0.1:8000/api/schema

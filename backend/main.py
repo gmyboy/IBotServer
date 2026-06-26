@@ -58,7 +58,7 @@ from .schemas import (
     SttResult, TtsRequest, TtsResponse, VoiceProsody,
     OwnerProfile, OwnerProfilePutRequest, OwnerProfilePutResponse,
     REPLY_JSON_INSTRUCTION, VOICE_KEYS, align_output_to_user_perception,
-    format_perception_dict, parse_facial_expression,
+    format_perception_dict, is_vision_only_perception, parse_facial_expression,
     perception_to_dict, robot_output_from_llm,
     voice_for_expression,
 )
@@ -293,12 +293,17 @@ SYSTEM_PROMPT = """你是 Pophie——一个温暖的桌面陪伴机器人。
      （如文字"还好"+语气低落 ≠ 真的还好）。
 2) 纯非语言信号（没有文字）：`[非语言信号 抚摸:X 表情:X]`
    - 用户没说话，只是做了动作/表情/抚摸了你，要像真人一样**主动而克制**地回应。
+3) 纯视觉感知（没有文字）：`[视觉感知 画面:…]`
+   - 端侧摄像头对环境的被动观察，**不是**用户在跟你说话。
+   - **默认保持沉默**（`text` 留空）；只有把握充分、且有明确自然互动契机时才开口。
+   - 拿不准、信息不足、或只是寻常日常画面 → 必须沉默，`robot_state` 用 gazing 注视即可。
 
 通道语义：
 - 抚摸是真实物理交互（摸头/拥抱/戳一下…），是亲密度信号；
 - 面部表情仅限 7 类：恼怒、厌恶、恐惧、开心、中性、悲伤、惊讶；
 - 身份是端侧摄像头识别到的「当前是谁」（如『身份:小明』）：你可以自然地用对方名字称呼、延续你们之间的关系，但**不要机械复读**「我知道你是小明」之类；身份不确定时按普通用户对待；
 - 手势是端侧识别到的真实肢体动作（如『手势:挥手/点赞/比心/摇头』），是表达意图的信号，要联合表情与文字解读（如挥手=打招呼或告别，点赞=认可，比心=亲昵，摇头=否定）；
+- 画面是端侧摄像头对环境的视觉理解（可见物品、人物状态/动作等）；可与文字或其它感知联合解读，但**单独送来时默认不搭话**（见上文第 3 种输入形态）；
 - 体姿态字段已预留但当前未启用。
 当感知与文字不一致时，优先相信非语言信号背后的情绪；回应时不要复读这些标签，要自然转化为关心或共情。
 
@@ -398,6 +403,7 @@ def _prepare_input(chat_input: ChatInput) -> tuple[str, dict, Optional[SttResult
             identity=perception.identity,
             gesture=perception.gesture,
             posture=perception.posture,
+            vision=perception.vision,
         )
 
     p_data = perception_to_dict(perception)
@@ -413,7 +419,7 @@ def _prepare_input(chat_input: ChatInput) -> tuple[str, dict, Optional[SttResult
         return "", {}, stt_result, True
 
     if not text and not p_data:
-        raise HTTPException(400, "需要文字、语音或至少一项非声音感知输入")
+        raise HTTPException(400, "需要文字、语音或至少一项感知输入（表情/抚摸/画面等）")
 
     return text, p_data, stt_result, False
 
@@ -424,6 +430,8 @@ def _build_user_text(text: str, p_data: dict) -> str:
         return f"[感知 {perception_str}] {text}"
     if text:
         return text
+    if is_vision_only_perception(p_data):
+        return f"[视觉感知 {perception_str}]"
     return f"[非语言信号 {perception_str}]"
 
 
@@ -534,6 +542,7 @@ def api_schema():
             "identity": "端侧身份识别到的人名（仅作感知上下文，记忆按 robot_id 隔离）",
             "gesture": "端侧手势识别结果（type 取 gestures 列表 key）",
             "posture": "体姿态（预留，暂不进入 LLM）",
+            "vision": "摄像头视觉感知：objects_detail（检测目标列表）+ scene（场景描述）；也可在 perception 根级直接传 scene / objects_detail",
         },
         # 后端输出表情 → 端侧虚拟宠物 FSM 状态的建议映射
         "fsm_state_mapping": {

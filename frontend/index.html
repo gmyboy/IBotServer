@@ -224,6 +224,9 @@
           <select id="s-posture" disabled>
             <option value="">无</option>
           </select></label>
+        <label style="grid-column:1/-1"><span class="group-title">画面 scene（摄像头）</span>
+          <textarea id="s-scene" rows="2" placeholder="端侧视觉场景描述，可单独发送（默认由 LLM 决定是否回应）" style="width:100%;background:var(--panel2);border:1px solid #2a2f4a;color:var(--text);border-radius:6px;padding:6px 8px;font-size:12px;font-family:inherit;resize:vertical"></textarea>
+        </label>
       </div>
       <div class="sense-actions">
         <button type="button" id="sense-clear">清空感知</button>
@@ -231,6 +234,7 @@
         <button type="button" data-preset='{"tone":"兴奋","intonation":"上扬","speed":"快","facial_expression":"happy"}'>开心兴奋</button>
         <button type="button" data-preset='{"tone":"急躁","intonation":"起伏大","speed":"快","facial_expression":"angry"}'>不耐烦</button>
         <button type="button" data-preset='{"touch":"摸头","tone":"撒娇","facial_expression":"happy"}'>撒娇求摸头</button>
+        <button type="button" data-preset='{"scene":"画面中可见：盆栽（画面下左方，识别置信度45%）；克俭有些走神、东张西望"}'>视觉观察</button>
       </div>
       <div class="sense-summary" id="sense-summary"></div>
         </div>
@@ -668,11 +672,11 @@ async function refreshProactiveLog(){
 const SENSE_FIELDS = {
   tone:"s-tone", intonation:"s-intonation", speed:"s-speed",
   touch:"s-touch", facial_expression:"s-face",
-  gesture:"s-gesture", posture:"s-posture",
+  gesture:"s-gesture", posture:"s-posture", scene:"s-scene",
 };
 const SENSE_LABELS = {
   tone:"语气", intonation:"语调", speed:"语速", touch:"抚摸",
-  facial_expression:"表情", gesture:"手势", posture:"体姿态",
+  facial_expression:"表情", gesture:"手势", posture:"体姿态", scene:"画面",
 };
 const VOICE_KEYS = ["tone","intonation","speed"];
 
@@ -690,6 +694,12 @@ function collectPerception(){
     if(v){ p[k] = v; any = true; }
   }
   return any ? p : null;
+}
+
+function isVisionOnlyPerception(p){
+  if(!p) return false;
+  const keys = Object.keys(p).filter(k => !VOICE_KEYS.includes(k));
+  return keys.length > 0 && keys.every(k => k === "scene");
 }
 
 function updateSenseSummary(){
@@ -729,6 +739,7 @@ function buildChatInput(text, perception){
     if(perception.facial_expression)
       perc.facial_expression = perception.facial_expression;
     if(perception.touch) perc.touch = perception.touch;
+    if(perception.scene) perc.scene = perception.scene;
     if(uid) perc.identity = uid;
     const voice = {};
     VOICE_KEYS.forEach(k => { if(perception[k]) voice[k] = perception[k]; });
@@ -832,7 +843,7 @@ async function send(){
       .map(([k,v]) => `${SENSE_LABELS[k]||k}:${FACE_LABELS[v]||v}`).join(" ");
     userDisplay = text
       ? `[感知 ${tag}]\n${text}`
-      : `[非语言信号 ${tag}]`;
+      : (isVisionOnlyPerception(perception) ? `[视觉感知 ${tag}]` : `[非语言信号 ${tag}]`);
   } else {
     userDisplay = text;
   }

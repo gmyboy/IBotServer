@@ -5,7 +5,7 @@ import re
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class FacialExpression(str, Enum):
@@ -220,6 +220,20 @@ class PostureAction(BaseModel):
     params: Optional[Dict[str, Any]] = None
 
 
+class VisionObjectDetail(BaseModel):
+    """摄像头画面中的单个识别目标。"""
+    name: str
+    confidence: Optional[float] = None
+    location: Optional[str] = None
+    box: Optional[List[float]] = None
+
+
+class VisionPerception(BaseModel):
+    """端侧摄像头视觉感知（物品检测 + 场景描述）。"""
+    objects_detail: Optional[List[VisionObjectDetail]] = None
+    scene: Optional[str] = None
+
+
 class AudioPayload(BaseModel):
     format: str = "wav"
     encoding: str = "base64"
@@ -235,6 +249,23 @@ class PerceptionInput(BaseModel):
         None, description="端侧身份识别到的人名（如『小明』）；仅作感知上下文，不分人记忆")
     gesture: Optional[GestureAction] = None
     posture: Optional[PostureAction] = None
+    vision: Optional[VisionPerception] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_vision(cls, data):
+        """兼容端侧在 perception 根级传 scene / objects_detail。"""
+        if not isinstance(data, dict) or data.get("vision") is not None:
+            return data
+        scene = data.get("scene")
+        objects_detail = data.get("objects_detail")
+        if scene is None and objects_detail is None:
+            return data
+        out = dict(data)
+        out["vision"] = {"scene": scene, "objects_detail": objects_detail}
+        out.pop("scene", None)
+        out.pop("objects_detail", None)
+        return out
 
     @field_validator("facial_expression", mode="before")
     @classmethod
@@ -392,6 +423,37 @@ class OwnerProfilePutResponse(BaseModel):
     session_id: Optional[str] = None
 
 
+def format_objects_detail(objects: List[VisionObjectDetail]) -> str:
+    parts = []
+    for obj in objects:
+        bit = obj.name
+        if obj.location:
+            bit += f"（{obj.location}"
+            if obj.confidence is not None:
+                bit += f"，识别置信度{round(obj.confidence * 100)}%"
+            bit += "）"
+        elif obj.confidence is not None:
+            bit += f"（识别置信度{round(obj.confidence * 100)}%）"
+        parts.append(bit)
+    if not parts:
+        return ""
+    return "画面中可见：" + "；".join(parts)
+
+
+def vision_scene_text(vision: Optional[VisionPerception]) -> str:
+    if not vision:
+        return ""
+    if vision.scene and vision.scene.strip():
+        return vision.scene.strip()
+    if vision.objects_detail:
+        return format_objects_detail(vision.objects_detail)
+    return ""
+
+
+def vision_has_content(vision: Optional[VisionPerception]) -> bool:
+    return bool(vision_scene_text(vision))
+
+
 def perception_to_dict(perception: Optional[PerceptionInput]) -> Dict:
     """把 PerceptionInput 展平为给 LLM 用的 dict。"""
     if not perception:
@@ -412,6 +474,14 @@ def perception_to_dict(perception: Optional[PerceptionInput]) -> Dict:
         data["identity"] = perception.identity
     if perception.gesture and perception.gesture.type:
         data["gesture"] = gesture_label(perception.gesture.type)
+    if perception.vision:
+        scene = vision_scene_text(perception.vision)
+        if scene:
+            data["scene"] = scene
+        if perception.vision.objects_detail:
+            data["objects_detail"] = [
+                o.model_dump(exclude_none=True) for o in perception.vision.objects_detail
+            ]
     # posture reserved — not sent to LLM yet
     return data
 
@@ -424,9 +494,19 @@ PERCEPTION_LABELS = [
     ("gesture", "手势"),
     ("identity", "身份"),
     ("facial_expression", "表情"),
+    ("scene", "画面"),
 ]
 
 VOICE_KEYS = {"tone", "intonation", "speed"}
+VISION_META_KEYS = {"scene", "objects_detail"}
+
+
+def is_vision_only_perception(data: Dict) -> bool:
+    """除声音侧道外，仅有摄像头画面感知（无表情/抚摸等主动交互信号）。"""
+    keys = {k for k, v in data.items() if k not in VOICE_KEYS and v}
+    if not keys:
+        return False
+    return keys <= VISION_META_KEYS and bool(keys & VISION_META_KEYS)
 
 
 def format_perception_dict(data: Dict) -> str:
@@ -503,6 +583,10 @@ REPLY_JSON_INSTRUCTION = """
 
 用户输入：[非语言信号 表情:悲伤]
 你的输出：{"text":"我在这儿呢，想安静待着我就陪着。","facial_expression":"sad","robot_state":"sleepy","voice":{"tone":"温柔","intonation":"下沉","speed":"慢"},"gesture":null,"posture":null}
+
+用户输入：[视觉感知 画面:画面中可见：盆栽（画面下左方，识别置信度45%）；克俭有些走神、东张西望]
+你的输出：{"text":"","facial_expression":"neutral","robot_state":"gazing","voice":{"tone":"平静","intonation":"平稳","speed":"正常"},"gesture":null,"posture":null}
+（仅被动画面观察、无用户开口且无明确互动契机 → text 必须留空，保持沉默）
 
 用户输入：[感知 表情:悲伤] 你好
 你的输出：{"text":"你好呀，我在这儿陪着你。","facial_expression":"sad","robot_state":"sleepy","voice":{"tone":"温柔","intonation":"下沉","speed":"慢"},"gesture":null,"posture":null}
