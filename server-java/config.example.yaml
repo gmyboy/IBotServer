@@ -1,0 +1,53 @@
+llm:
+  base_url: https://api.deepseek.com/v1
+  api_key: ""   # 或设置环境变量 LLM_API_KEY
+  model: deepseek-chat
+  timeout: 60
+  temperature: 0.7
+  thinking:
+    type: disabled
+  json_mode: false
+  chat_temperature: 0.3
+memory:
+  l2_session_cap: 20
+  l2_to_l3_importance: 0.55
+  l3_to_l4_importance: 0.8
+  l3_to_l4_reinforce_count: 3
+  direct_l4_importance: 0.9
+  importance_weight: 0.6
+  emotion_weight: 0.5
+  emotion_direct_l4_intensity: 0.85
+  recall_emotion_weight: 0.5
+server:
+  host: 0.0.0.0
+  port: 8000
+  default_robot: default
+  admin_token: ""   # 或设置环境变量 ADMIN_TOKEN
+chat:
+  defer_side_tasks: true
+  inline_tts: true
+  max_tokens: 200
+  recent_turns: 8
+  recall_top_k: 5
+speech:
+  enabled: true
+  stt:
+    model: qwen3-asr-flash-realtime
+    language: zh
+    sample_rate: 16000
+    chunk_bytes: 3200
+    connect_delay_sec: 0.1
+    timeout: 30
+    max_retries: 3
+    retry_delay_sec: 1.0
+  tts:
+    api_key: ""   # 或设置环境变量 DASHSCOPE_API_KEY
+    base_url: wss://dashscope.aliyuncs.com/api-ws/v1/inference
+    model: cosyvoice-v3-flash
+    format: mp3
+    stream_format: pcm
+    timeout: 30
+    default_voice: gentle_female
+    sample_rate: 22050
+    max_retries: 3
+    retry_delay_sec: 1.0

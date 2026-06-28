@@ -1,0 +1,8 @@
+target/
+logs/
+*.log
+.env
+config.yaml
+!config.example.yaml
+.idea/
+*.iml
