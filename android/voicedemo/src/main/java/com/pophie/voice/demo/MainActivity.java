@@ -34,11 +34,15 @@ public class MainActivity extends AppCompatActivity {
     private static final String TAG = "VoiceDemo";
     private static final int SR = 16000;
 
+    /** 登记主人时让用户朗读的固定提示语。 */
+    private static final String ENROLL_TEXT = "你好，我是你的主人，以后主要由我来跟你说话，记住我的声音就好";
+
     private VoiceEngine engine;
     private GateMode mode = GateMode.REPORT;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    private TextView status, speaker, meter, log;
+    private TextView status, speaker, meter, log, enrollHint;
+    private volatile boolean enrolling = false;
     private long bytes = 0;
     private final StringBuilder logBuf = new StringBuilder();
 
@@ -51,6 +55,8 @@ public class MainActivity extends AppCompatActivity {
         speaker = findViewById(R.id.speaker);
         meter = findViewById(R.id.meter);
         log = findViewById(R.id.log);
+        enrollHint = findViewById(R.id.enrollHint);
+        enrollHint.setText("登记主人时请朗读这句话：\n「" + ENROLL_TEXT + "」");
 
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
@@ -66,9 +72,23 @@ public class MainActivity extends AppCompatActivity {
         buildEngine();
 
         btnStart.setOnClickListener(v -> {
-            bytes = 0;
-            engine.start();
-            status.setText("状态：运行中");
+            if (enrolling) { toast("正在登记主人，请稍候"); return; }
+            status.setText("状态：检查是否已登记主人…");
+            // isOwnerEnrolled() 可能触发模型下载，放后台线程
+            new Thread(() -> {
+                boolean enrolled = engine.isOwnerEnrolled();
+                ui.post(() -> {
+                    if (!enrolled) {
+                        toast("尚未登记主人，请先点【登记主人(4s)】并朗读提示语");
+                        status.setText("状态：未登记主人");
+                        enrollHint.setText("⚠ 请先登记主人，朗读：\n「" + ENROLL_TEXT + "」");
+                        return;
+                    }
+                    bytes = 0;
+                    engine.start();
+                    status.setText("状态：运行中");
+                });
+            }).start();
         });
         btnStop.setOnClickListener(v -> {
             engine.stop();
@@ -146,15 +166,31 @@ public class MainActivity extends AppCompatActivity {
             toast("缺少录音权限");
             return;
         }
-        toast("开始录制 4 秒主人语音…");
+        if (enrolling) return;
+        enrolling = true;
+        // 提示用户朗读固定句子
+        enrollHint.setText("请朗读这句话（即将录音 4 秒）：\n「" + ENROLL_TEXT + "」");
+        status.setText("登记：准备录音，请朗读提示语…");
+        toast("请朗读提示语，准备录音");
         new Thread(() -> {
             try {
+                Thread.sleep(800); // 给用户一点准备时间
+                ui.post(() -> status.setText("登记录音中(4s)…请朗读提示语"));
                 short[] pcm = record(4000);
                 engine.enrollOwner(Collections.singletonList(pcm));
-                ui.post(() -> toast("主人登记完成（" + (pcm.length / SR) + "s）"));
+                ui.post(() -> {
+                    toast("主人登记完成（" + (pcm.length / SR) + "s）");
+                    status.setText("状态：已登记主人，可点【开始】");
+                    enrollHint.setText("✓ 已登记主人。登记用语：\n「" + ENROLL_TEXT + "」");
+                });
             } catch (Throwable t) {
                 Log.e(TAG, "enroll failed", t);
-                ui.post(() -> toast("登记失败：" + t.getMessage()));
+                ui.post(() -> {
+                    toast("登记失败：" + t.getMessage());
+                    status.setText("状态：登记失败");
+                });
+            } finally {
+                enrolling = false;
             }
         }).start();
     }
