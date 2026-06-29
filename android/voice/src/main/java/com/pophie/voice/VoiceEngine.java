@@ -205,6 +205,11 @@ public final class VoiceEngine {
         return scorer.currentOwnerThreshold();
     }
 
+    /** 手动设置裸 cosine 阈值（无 cohort 路径用）；可据自检数值微调。 */
+    public synchronized void setOwnerThreshold(float t) {
+        try { ensureScorer(); scorer.setOwnerThreshold(t); } catch (Exception ignored) {}
+    }
+
     /** 自检：录一段返回自检分数（AS-Norm 启用时为归一化分，否则裸 cosine；无主人 NaN）。后台线程调用。 */
     public synchronized float verifyOwnerFromMic(int ms) throws Exception {
         ensureScorer();

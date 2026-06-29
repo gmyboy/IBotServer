@@ -120,27 +120,11 @@ public final class SpeakerScorer {
         for (int i = 0; i < dim; i++) centroid[i] /= embs.size();
         centroid = l2norm(centroid);
 
-        double thr;
-        if (embs.size() >= 3) {
-            double[] cos = new double[embs.size()];
-            double sum = 0;
-            for (int j = 0; j < embs.size(); j++) { cos[j] = cosine(embs.get(j), centroid); sum += cos[j]; }
-            double mean = sum / embs.size();
-            double var = 0;
-            for (double c : cos) var += (c - mean) * (c - mean);
-            var /= embs.size();
-            double sd = Math.sqrt(var);
-            thr = mean - 2.0 * sd;
-        } else {
-            // 样本太少：以质心自相似打个保守折扣
-            thr = cosine(embs.get(0), centroid) - 0.12;
-        }
-        thr = Math.max(0.30, Math.min(0.60, thr));
-
         store.put(name, centroid, true);
-        store.setOwnerThreshold(thr);
+        store.setOwnerThreshold(0); // 清掉旧版可能残留的高估阈值，无 cohort 时回退默认
 
-        // AS-Norm 校准（cohort 足够时）：用 cohort 把分数归一化，并按"主人 vs 冒充者"定归一化阈值
+        // 注意：不用"单段 μ-2σ"自估阈值——同一段登记音频各窗高度相似，σ 极小会把阈值高估到 ~0.6，
+        // 导致跨句/隔时说话时同一个人也够不到。正确做法是 AS-Norm（需 cohort）；无 cohort 时用固定默认阈值。
         if (cohort.size() >= MIN_COHORT_FOR_ASNORM) {
             double[] oc = cohortStats(centroid);            // 主人质心相对 cohort 的 μc/σc
             List<Double> gen = new ArrayList<>();            // 真人(各登记窗)归一化分
@@ -157,9 +141,14 @@ public final class SpeakerScorer {
             }
             double nth = chooseThreshold(gen, imp);
             store.setOwnerCalibration(oc[0], oc[1], nth);
+            return nth;
         }
-        return thr;
+        // 无 cohort：用默认阈值（可由 setOwnerThreshold 手动微调）
+        return defaultThreshold;
     }
+
+    /** 手动设置裸 cosine 阈值（无 cohort 路径用；AS-Norm 生效时以归一化阈值为准）。 */
+    public synchronized void setOwnerThreshold(float t) { store.setOwnerThreshold(t); }
 
     /** 两高斯交叉点近似(EER)：阈值卡在主人分布与冒充分布之间。 */
     private static double chooseThreshold(List<Double> genuine, List<Double> impostor) {

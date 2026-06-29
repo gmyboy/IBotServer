@@ -88,7 +88,9 @@ Demo（`:voicedemo`）：开始/停止、登记主人(4s)、清空声纹、切 R
   运行时打分用这个个性化阈值。不同人/不同手机各自自适应，无需手调。`ownerThreshold()` 可读当前阈值。
 - **登记与打分同一信号域**：声纹用**输出路(原始/系统降噪)**音频，**不**用高通分析路；登记走 `enrollOwnerFromMic`(与运行时同一 MicSource)。
 - `embed()` 内部统一**去首尾静音**，登记/打分都只用有声段。
-- `VoiceConfig.ownerThreshold` 仅作**未自动标定时的回退默认**(0.5)；自检见 `verifyOwnerFromMic()` / Demo「自检相似度」。
+- **不再用单段 μ−2σ 自估阈值**（同一段登记音频各窗高度相似 → σ 极小 → 阈值被高估到 ~0.6，跨句同人够不到）。
+  无 cohort 时用固定回退阈值 `VoiceConfig.ownerThreshold`(默认 **0.35**，campplus 跨句同人约 0.4~0.55)，可用 `setOwnerThreshold()` 按自检数值微调；
+  有 cohort 时走 AS-Norm 归一化阈值（推荐）。自检见 `verifyOwnerFromMic()` / Demo「自检相似度」。
 
 ## 调参与局限
 - `ownerThreshold`、cosine→概率校准（`SpeakerScorer.calibrate` 的 k）、`preRollMs`、`maxSilenceMs`、`minScoreRms` 需真机标定。
