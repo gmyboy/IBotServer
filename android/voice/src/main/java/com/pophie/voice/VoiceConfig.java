@@ -79,8 +79,8 @@ public final class VoiceConfig {
         private int vadWindowSize = 512;
 
         private SpeakerModel speakerModel = SpeakerModel.SMALL_INT8;
-        private float ownerThreshold = 0.55f;
-        private int decisionWindowMs = 300;
+        private float ownerThreshold = 0.5f;       // campplus 同人 cosine 常 0.5~0.7，真机再标定
+        private int decisionWindowMs = 600;        // 首次打分窗口（太短 embedding 不稳）
         private int rescorePeriodMs = 1000;
         private double minScoreRms = 300.0;
         private float emaAlpha = 0.5f;

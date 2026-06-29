@@ -74,6 +74,11 @@ new Thread(() -> {
 Demo（`:voicedemo`）：开始/停止、登记主人(4s)、清空声纹、切 REPORT/OWNER_ONLY；
 实时看 speaking、`SpeakerInfo(conf/margin/state/主人)`、输出字节、段日志。
 
+## 声纹匹配率注意（重要）
+- **登记与打分必须同一信号域**：声纹打分用**输出路(原始/系统降噪)**音频，**不**用高通分析路（否则 cosine 偏低、匹配率差）。登记(`enrollOwner`) 与运行时建议都走 `VOICE_COMMUNICATION` 采集。
+- 登记前会**按能量裁掉首尾静音**；请连续朗读、说满 ~4s、与日常说话同样的距离/音量/设备。
+- 默认 `ownerThreshold=0.5`（campplus 同人 cosine 常 0.5~0.7），`decisionWindowMs=600`（窗口太短 embedding 不稳）。
+
 ## 调参与局限
 - `ownerThreshold`、cosine→概率校准（`SpeakerScorer.calibrate` 的 k）、`preRollMs`、`maxSilenceMs`、`minScoreRms` 需真机标定。
 - 段首 ~0.3s 可信度偏临时（PENDING→refine）；过短语音不稳；远场/强噪退化；多人重叠 diarization 不做。

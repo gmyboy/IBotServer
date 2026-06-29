@@ -51,14 +51,16 @@ public final class SpeakerScorer {
         }
     }
 
-    /** 登记：多段取平均 embedding。isOwner=true 记为主人。 */
+    /** 登记：多段取平均 embedding。isOwner=true 记为主人。登记前按能量裁掉首尾静音。 */
     public synchronized void enroll(String name, List<short[]> samples, boolean isOwner) {
         if (samples == null || samples.isEmpty()) return;
         float[] avg = null;
         int n = 0;
         for (short[] s : samples) {
             if (s == null || s.length == 0) continue;
-            float[] e = embed(s);
+            short[] trimmed = trimSilence(s);
+            if (trimmed.length < sampleRate / 2) trimmed = s; // 太短则用原段
+            float[] e = embed(trimmed);
             if (avg == null) avg = new float[e.length];
             for (int i = 0; i < e.length; i++) avg[i] += e[i];
             n++;
@@ -66,6 +68,33 @@ public final class SpeakerScorer {
         if (avg == null || n == 0) return;
         for (int i = 0; i < avg.length; i++) avg[i] /= n;
         store.put(name, l2norm(avg), isOwner);
+    }
+
+    /** 按 20ms 窗能量裁掉首尾静音，保留中间有声部分（提升登记质量）。 */
+    private short[] trimSilence(short[] pcm) {
+        int win = sampleRate / 50; // 20ms
+        if (win <= 0 || pcm.length < win * 2) return pcm;
+        int nWin = pcm.length / win;
+        double[] rms = new double[nWin];
+        double peak = 0;
+        for (int w = 0; w < nWin; w++) {
+            double sum = 0;
+            int base = w * win;
+            for (int i = 0; i < win; i++) { double v = pcm[base + i]; sum += v * v; }
+            rms[w] = Math.sqrt(sum / win);
+            if (rms[w] > peak) peak = rms[w];
+        }
+        double thr = Math.max(150.0, peak * 0.15);
+        int first = -1, last = -1;
+        for (int w = 0; w < nWin; w++) {
+            if (rms[w] >= thr) { if (first < 0) first = w; last = w; }
+        }
+        if (first < 0 || last < first) return pcm;
+        int start = first * win;
+        int end = Math.min(pcm.length, (last + 1) * win);
+        short[] out = new short[end - start];
+        System.arraycopy(pcm, start, out, 0, out.length);
+        return out;
     }
 
     public synchronized void remove(String name) { store.remove(name); }

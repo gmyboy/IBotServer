@@ -280,7 +280,8 @@ public final class VoiceEngine {
         boolean rescoreDue = seg.scoredOnce && seg.msSinceScore >= config.rescorePeriodMs;
         if (!firstDue && !rescoreDue) return;
 
-        short[] window = WavUtil.concat(seg.analysisFrames);
+        // 用输出路(与登记一致的原始/降噪信号)打分，避免高通分析路造成的域不匹配
+        short[] window = WavUtil.concat(seg.outFrames);
         seg.msSinceScore = 0;
         if (WavUtil.rms(window) < config.minScoreRms) {
             // 能量过低：不打分，保持/置 UNKNOWN
@@ -329,10 +330,10 @@ public final class VoiceEngine {
         SpeakerInfo finalSpeaker = seg.current != null ? seg.current : SpeakerInfo.unknown(0f);
         float[] emb = null;
         try {
-            short[] ana = WavUtil.concat(seg.analysisFrames);
-            if (WavUtil.rms(ana) >= config.minScoreRms && !scorer.isEmpty()) {
-                finalSpeaker = scorer.score(ana);
-                emb = scorer.embed(ana);
+            short[] full = WavUtil.concat(seg.outFrames); // 与登记一致的信号
+            if (WavUtil.rms(full) >= config.minScoreRms && !scorer.isEmpty()) {
+                finalSpeaker = scorer.score(full);
+                emb = scorer.embed(full);
             }
         } catch (Throwable ignored) {}
         VoiceSegment out = new VoiceSegment(pcm, config.sampleRate, finalSpeaker, emb);
