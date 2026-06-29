@@ -63,7 +63,6 @@ public class MainActivity extends AppCompatActivity {
         Button btnCohort = findViewById(R.id.btnCohort);
         btnVerify.setOnClickListener(v -> verifyOwner());
         btnCohort.setOnClickListener(v -> addCohort());
-        refreshCohortInfo();
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -71,6 +70,7 @@ public class MainActivity extends AppCompatActivity {
         }
 
         buildEngine();
+        refreshCohortInfo();
 
         btnStart.setOnClickListener(v -> {
             if (enrolling) { toast("正在登记主人，请稍候"); return; }
@@ -260,6 +260,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void refreshCohortInfo() {
+        if (engine == null) return;
         new Thread(() -> {
             int n = engine.cohortSize();
             boolean as = engine.asnormActive();
