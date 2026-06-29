@@ -50,7 +50,7 @@ public class MainActivity extends AppCompatActivity {
         meter = findViewById(R.id.meter);
         log = findViewById(R.id.log);
         enrollHint = findViewById(R.id.enrollHint);
-        enrollHint.setText("登记主人时请朗读这句话：\n「" + ENROLL_TEXT + "」");
+        enrollHint.setText("登记主人：请连续说约 8 秒（几句话，可把下面这句读两遍），系统会自动算阈值，只需一次：\n「" + ENROLL_TEXT + "」");
         verifyResult = findViewById(R.id.verifyResult);
 
         Button btnStart = findViewById(R.id.btnStart);
@@ -78,7 +78,7 @@ public class MainActivity extends AppCompatActivity {
                     if (!enrolled) {
                         toast("尚未登记主人，请先点【登记主人(4s)】并朗读提示语");
                         status.setText("状态：未登记主人");
-                        enrollHint.setText("⚠ 请先登记主人，朗读：\n「" + ENROLL_TEXT + "」");
+                        enrollHint.setText("⚠ 请先登记主人（连续说约 8 秒）：\n「" + ENROLL_TEXT + "」");
                         return;
                     }
                     bytes = 0;
@@ -166,21 +166,22 @@ public class MainActivity extends AppCompatActivity {
         }
         if (enrolling) return;
         enrolling = true;
-        // 提示用户朗读固定句子
-        enrollHint.setText("请朗读这句话（即将录音 4 秒）：\n「" + ENROLL_TEXT + "」");
-        status.setText("登记：准备录音，请朗读提示语…");
-        toast("请朗读提示语，准备录音");
+        enrollHint.setText("请连续说约 8 秒（几句话，可把下面这句读两遍）：\n「" + ENROLL_TEXT + "」");
+        status.setText("登记：准备录音，请连续说话…");
+        toast("请连续说约 8 秒，准备录音");
         new Thread(() -> {
             try {
                 engine.stop();      // 避免与运行时麦克风冲突
                 Thread.sleep(800);  // 给用户一点准备时间
-                ui.post(() -> status.setText("登记录音中(4s)…请朗读提示语"));
-                // 走与运行时一致的采集路径登记，提升匹配率
-                int n = engine.enrollOwnerFromMic(4000);
+                ui.post(() -> status.setText("登记录音中(8s)…请连续说话"));
+                // 走与运行时一致的采集路径登记 + 自动标定阈值
+                double thr = engine.enrollOwnerFromMic(8000);
                 ui.post(() -> {
-                    toast("主人登记完成（" + (n / SR) + "s）");
+                    toast(String.format(java.util.Locale.ROOT, "登记完成，自动阈值=%.3f", thr));
                     status.setText("状态：已登记主人，可点【开始】或【自检】");
-                    enrollHint.setText("✓ 已登记主人。\n登记用语：「" + ENROLL_TEXT + "」");
+                    enrollHint.setText("✓ 已登记主人。自动阈值=" + String.format(java.util.Locale.ROOT, "%.3f", thr)
+                            + "\n登记用语：「" + ENROLL_TEXT + "」");
+                    verifyResult.setText("自检：—（可点【自检相似度】验证）");
                 });
             } catch (Throwable t) {
                 Log.e(TAG, "enroll failed", t);
@@ -208,12 +209,14 @@ public class MainActivity extends AppCompatActivity {
             try {
                 engine.stop();
                 float c = engine.verifyOwnerFromMic(2500);
+                float th = engine.ownerThreshold();
                 ui.post(() -> {
                     if (c < 0) {
                         verifyResult.setText("自检：尚未登记主人");
                     } else {
+                        boolean pass = c >= th;
                         verifyResult.setText(String.format(java.util.Locale.ROOT,
-                                "自检 cosine=%.3f（当前阈值 0.5，≥阈值即判主人）", c));
+                                "自检 cosine=%.3f  阈值=%.3f  → %s", c, th, pass ? "判为主人 ✓" : "判为非主人 ✗"));
                     }
                     status.setText("状态：自检完成");
                 });

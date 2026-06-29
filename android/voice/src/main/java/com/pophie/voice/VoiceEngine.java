@@ -193,11 +193,16 @@ public final class VoiceEngine {
      * 避免登记/识别前处理不一致导致的低匹配率。请在后台线程调用；调用前应先 stop()。
      * @return 实际采集的样本数
      */
-    public synchronized int enrollOwnerFromMic(int ms) throws Exception {
+    public synchronized double enrollOwnerFromMic(int ms) throws Exception {
         ensureScorer();
         short[] pcm = captureMs(ms);
-        scorer.enroll(OWNER_NAME, java.util.Collections.singletonList(pcm), true);
-        return pcm.length;
+        return scorer.enrollOwnerAuto(OWNER_NAME, pcm); // 自动标定阈值，返回阈值
+    }
+
+    /** 当前生效的主人阈值（自动标定值或默认值）。 */
+    public synchronized float ownerThreshold() {
+        try { ensureScorer(); } catch (Exception e) { return 0f; }
+        return scorer.currentOwnerThreshold();
     }
 
     /** 自检：用相同采集路径录一段，返回与主人的原始 cosine（无主人或失败返回 -1）。后台线程调用。 */

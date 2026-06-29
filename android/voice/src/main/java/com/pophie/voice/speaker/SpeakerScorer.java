@@ -9,6 +9,7 @@ import com.pophie.voice.SpeakerInfo;
 import com.pophie.voice.WavUtil;
 
 import java.io.File;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -21,7 +22,7 @@ public final class SpeakerScorer {
     private final SpeakerEmbeddingExtractor extractor;
     private final EmbeddingStore store;
     private final int sampleRate;
-    private final float threshold;
+    private final float defaultThreshold;  // 未自动标定时的回退阈值
     private final float emaAlpha;
 
     private float smoothed = Float.NaN; // 段内 EMA 状态
@@ -33,8 +34,64 @@ public final class SpeakerScorer {
         this.extractor = new SpeakerEmbeddingExtractor(assetManager, cfg);
         this.store = new EmbeddingStore(storeDir);
         this.sampleRate = sampleRate;
-        this.threshold = threshold;
+        this.defaultThreshold = threshold;
         this.emaAlpha = emaAlpha;
+    }
+
+    /** 当前生效阈值：优先用登记时自动标定的个性化阈值，否则用默认阈值。 */
+    public synchronized float effectiveThreshold() {
+        double t = store.ownerThreshold();
+        return t > 0 ? (float) t : defaultThreshold;
+    }
+
+    public synchronized float currentOwnerThreshold() { return effectiveThreshold(); }
+
+    /**
+     * 自动标定登记：主人连续说一段(建议 ~8s 多句)，切成多窗算 embedding，
+     * 质心作为主人声纹，并用"主人内部自相似分布"自动定阈值 = μ - 2σ（钳制到 [0.30,0.60]）。
+     * @return 标定出的阈值
+     */
+    public synchronized double enrollOwnerAuto(String name, short[] longPcm) {
+        short[] voiced = trimSilence(longPcm);
+        if (voiced.length < sampleRate) voiced = longPcm; // < 1s 用原段
+        int winLen = sampleRate * 2;            // 2s 窗
+        int hop = (int) (sampleRate * 1.5);     // 1.5s 跳
+        List<float[]> embs = new ArrayList<>();
+        for (int start = 0; start + sampleRate <= voiced.length; start += hop) { // 至少 1s 才算一窗
+            int end = Math.min(voiced.length, start + winLen);
+            short[] w = new short[end - start];
+            System.arraycopy(voiced, start, w, 0, w.length);
+            embs.add(embed(w));
+            if (end >= voiced.length) break;
+        }
+        if (embs.isEmpty()) embs.add(embed(voiced));
+
+        int dim = embs.get(0).length;
+        float[] centroid = new float[dim];
+        for (float[] e : embs) for (int i = 0; i < dim; i++) centroid[i] += e[i];
+        for (int i = 0; i < dim; i++) centroid[i] /= embs.size();
+        centroid = l2norm(centroid);
+
+        double thr;
+        if (embs.size() >= 3) {
+            double[] cos = new double[embs.size()];
+            double sum = 0;
+            for (int j = 0; j < embs.size(); j++) { cos[j] = cosine(embs.get(j), centroid); sum += cos[j]; }
+            double mean = sum / embs.size();
+            double var = 0;
+            for (double c : cos) var += (c - mean) * (c - mean);
+            var /= embs.size();
+            double sd = Math.sqrt(var);
+            thr = mean - 2.0 * sd;
+        } else {
+            // 样本太少：以质心自相似打个保守折扣
+            thr = cosine(embs.get(0), centroid) - 0.12;
+        }
+        thr = Math.max(0.30, Math.min(0.60, thr));
+
+        store.put(name, centroid, true);
+        store.setOwnerThreshold(thr);
+        return thr;
     }
 
     /** 计算一段 PCM16 的归一化 embedding（内部先去首尾静音，登记/打分一致）。 */
@@ -127,13 +184,14 @@ public final class SpeakerScorer {
             }
         }
 
-        float conf = calibrate(bestCos);
+        float th = effectiveThreshold();
+        float conf = calibrate(bestCos, th);
         // 段内 EMA 平滑
         if (Float.isNaN(smoothed)) smoothed = conf;
         else smoothed = emaAlpha * conf + (1 - emaAlpha) * smoothed;
 
         float margin = (secondCos > -2f) ? (bestCos - secondCos) : bestCos;
-        boolean decided = bestCos >= threshold;
+        boolean decided = bestCos >= th;
         boolean isOwner = decided && bestName != null && bestName.equals(store.ownerName());
         SpeakerInfo.State state = decided ? SpeakerInfo.State.DECIDED : SpeakerInfo.State.UNKNOWN;
         String name = decided ? bestName : null;
@@ -153,9 +211,9 @@ public final class SpeakerScorer {
         try { extractor.release(); } catch (Throwable ignored) {}
     }
 
-    // cosine→0~1 校准（以 threshold 为中心的 logistic；阈值处=0.5）。需真机标定 k/threshold。
-    private float calibrate(float cos) {
-        double v = 1.0 / (1.0 + Math.exp(-12.0 * (cos - threshold)));
+    // cosine→0~1 校准（以生效阈值为中心的 logistic；阈值处=0.5）。
+    private float calibrate(float cos, float th) {
+        double v = 1.0 / (1.0 + Math.exp(-12.0 * (cos - th)));
         return (float) Math.max(0.0, Math.min(1.0, v));
     }
 

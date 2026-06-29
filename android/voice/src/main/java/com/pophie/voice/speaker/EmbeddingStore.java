@@ -22,6 +22,7 @@ public final class EmbeddingStore {
     private final File file;
     private final Map<String, float[]> speakers = new LinkedHashMap<>();
     private String ownerName = null;
+    private double ownerThreshold = 0; // 0 表示未自动标定，用默认阈值
 
     public EmbeddingStore(File dir) {
         if (!dir.exists()) dir.mkdirs();
@@ -34,6 +35,10 @@ public final class EmbeddingStore {
     }
 
     public synchronized String ownerName() { return ownerName; }
+
+    public synchronized double ownerThreshold() { return ownerThreshold; }
+
+    public synchronized void setOwnerThreshold(double t) { ownerThreshold = t; save(); }
 
     public synchronized void put(String name, float[] embedding, boolean isOwner) {
         speakers.put(name, embedding);
@@ -50,6 +55,7 @@ public final class EmbeddingStore {
     public synchronized void clear() {
         speakers.clear();
         ownerName = null;
+        ownerThreshold = 0;
         save();
     }
 
@@ -61,6 +67,7 @@ public final class EmbeddingStore {
             String json = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
             JSONObject root = new JSONObject(json);
             ownerName = root.optString("owner", null);
+            ownerThreshold = root.optDouble("owner_threshold", 0);
             JSONObject sp = root.optJSONObject("speakers");
             if (sp != null) {
                 for (java.util.Iterator<String> it = sp.keys(); it.hasNext(); ) {
@@ -80,6 +87,7 @@ public final class EmbeddingStore {
         try {
             JSONObject root = new JSONObject();
             if (ownerName != null) root.put("owner", ownerName);
+            if (ownerThreshold > 0) root.put("owner_threshold", ownerThreshold);
             JSONObject sp = new JSONObject();
             for (Map.Entry<String, float[]> e : speakers.entrySet()) {
                 JSONArray arr = new JSONArray();

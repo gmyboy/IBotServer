@@ -75,9 +75,12 @@ Demo（`:voicedemo`）：开始/停止、登记主人(4s)、清空声纹、切 R
 实时看 speaking、`SpeakerInfo(conf/margin/state/主人)`、输出字节、段日志。
 
 ## 声纹匹配率注意（重要）
-- **登记与打分必须同一信号域**：声纹打分用**输出路(原始/系统降噪)**音频，**不**用高通分析路（否则 cosine 偏低、匹配率差）。登记(`enrollOwner`) 与运行时建议都走 `VOICE_COMMUNICATION` 采集。
-- 登记前会**按能量裁掉首尾静音**；请连续朗读、说满 ~4s、与日常说话同样的距离/音量/设备。
-- 默认 `ownerThreshold=0.5`（campplus 同人 cosine 常 0.5~0.7），`decisionWindowMs=600`（窗口太短 embedding 不稳）。
+- **自动阈值（推荐，按人自适应，只记一次）**：用 `enrollOwnerFromMic(8000)` 让主人连续说 ~8s(几句话)，
+  SDK 切多窗算 embedding 质心 + 主人内部自相似分布，自动定阈值 `μ-2σ`(钳制 [0.30,0.60]) 并持久化；
+  运行时打分用这个个性化阈值。不同人/不同手机各自自适应，无需手调。`ownerThreshold()` 可读当前阈值。
+- **登记与打分同一信号域**：声纹用**输出路(原始/系统降噪)**音频，**不**用高通分析路；登记走 `enrollOwnerFromMic`(与运行时同一 MicSource)。
+- `embed()` 内部统一**去首尾静音**，登记/打分都只用有声段。
+- `VoiceConfig.ownerThreshold` 仅作**未自动标定时的回退默认**(0.5)；自检见 `verifyOwnerFromMic()` / Demo「自检相似度」。
 
 ## 调参与局限
 - `ownerThreshold`、cosine→概率校准（`SpeakerScorer.calibrate` 的 k）、`preRollMs`、`maxSilenceMs`、`minScoreRms` 需真机标定。
