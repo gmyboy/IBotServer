@@ -14,9 +14,6 @@ import com.k2fsa.sherpa.onnx.VadModelConfig;
 public final class SileroVad {
 
     private final Vad vad;
-    private final int windowSize;
-    private float[] buffer = new float[0];
-    private float lastProb = 0f;
 
     /**
      * @param modelPath     silero_vad.onnx 路径（filesDir 绝对路径；assets 时为相对路径）
@@ -24,13 +21,12 @@ public final class SileroVad {
      */
     public SileroVad(String modelPath, AssetManager assetManager,
                      float threshold, int sampleRate, int windowSize, int numThreads) {
-        this.windowSize = windowSize;
         SileroVadModelConfig silero = new SileroVadModelConfig(
                 modelPath,            // model
                 threshold,            // threshold
                 0.1f,                 // minSilenceDuration（我们自己做端点，这里给默认）
                 0.1f,                 // minSpeechDuration
-                windowSize,           // windowSize
+                windowSize,           // windowSize（Silero v5 = 512）
                 20f                   // maxSpeechDuration
         );
         TenVadModelConfig ten = new TenVadModelConfig("", 0.5f, 0.1f, 0.1f, windowSize, 20f);
@@ -38,33 +34,20 @@ public final class SileroVad {
         this.vad = new Vad(assetManager, cfg);
     }
 
-    /** 喂入任意长度 float 帧；处理所有完整窗口后返回最近一次语音概率。 */
+    /**
+     * 喂入任意长度 float 帧（内部按 windowSize 缓冲，sherpa 标准用法）；
+     * 返回当前是否检测到语音（1=语音 / 0=静音）。
+     */
     public synchronized float prob(float[] frame) {
         if (frame != null && frame.length > 0) {
-            float[] merged = new float[buffer.length + frame.length];
-            System.arraycopy(buffer, 0, merged, 0, buffer.length);
-            System.arraycopy(frame, 0, merged, buffer.length, frame.length);
-            buffer = merged;
+            vad.acceptWaveform(frame);
         }
-        int off = 0;
-        while (buffer.length - off >= windowSize) {
-            float[] win = new float[windowSize];
-            System.arraycopy(buffer, off, win, 0, windowSize);
-            lastProb = vad.compute(win);
-            off += windowSize;
-        }
-        if (off > 0) {
-            int rem = buffer.length - off;
-            float[] nb = new float[rem];
-            System.arraycopy(buffer, off, nb, 0, rem);
-            buffer = nb;
-        }
-        return lastProb;
+        // 我们用自己的 Endpointer 做端点，sherpa 自带的分段在此丢弃以释放内存
+        while (!vad.empty()) vad.pop();
+        return vad.isSpeechDetected() ? 1f : 0f;
     }
 
     public synchronized void reset() {
-        buffer = new float[0];
-        lastProb = 0f;
         try { vad.reset(); } catch (Throwable ignored) {}
     }
 

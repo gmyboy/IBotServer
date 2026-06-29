@@ -173,7 +173,7 @@ public final class SpeakerScorer {
     }
 
     /** 计算一段 PCM16 的归一化 embedding（内部先去首尾静音，登记/打分一致）。 */
-    public float[] embed(short[] pcm) {
+    public synchronized float[] embed(short[] pcm) {
         short[] voiced = trimSilence(pcm);
         if (voiced.length < sampleRate / 4) voiced = pcm; // < 0.25s 用原段，避免裁空
         float[] f = WavUtil.pcm16ToFloat(voiced);
