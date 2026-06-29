@@ -85,6 +85,19 @@
         </LinearLayout>
 
         <Button
+            android:id="@+id/btnCohort"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="录入背景人声/别人(2.5s)" />
+
+        <TextView
+            android:id="@+id/cohortInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="13sp"
+            android:text="cohort：0（建议先录 ≥8 个不同的人，再登记主人，阈值更准）" />
+
+        <Button
             android:id="@+id/btnVerify"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

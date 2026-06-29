@@ -22,7 +22,13 @@ public final class EmbeddingStore {
     private final File file;
     private final Map<String, float[]> speakers = new LinkedHashMap<>();
     private String ownerName = null;
-    private double ownerThreshold = 0; // 0 表示未自动标定，用默认阈值
+    private double ownerThreshold = 0; // 0 表示未自动标定，用默认阈值（裸 cosine 阈值，回退用）
+
+    // AS-Norm 校准（cohort 可用时）
+    private boolean ownerAsnorm = false;
+    private double ownerCohortMean = 0;   // 主人质心相对 cohort 的 topK 均值
+    private double ownerCohortStd = 1;    // 主人质心相对 cohort 的 topK 标准差
+    private double ownerNormThreshold = 0;// 归一化分数阈值
 
     public EmbeddingStore(File dir) {
         if (!dir.exists()) dir.mkdirs();
@@ -40,6 +46,19 @@ public final class EmbeddingStore {
 
     public synchronized void setOwnerThreshold(double t) { ownerThreshold = t; save(); }
 
+    public synchronized boolean ownerAsnorm() { return ownerAsnorm; }
+    public synchronized double ownerCohortMean() { return ownerCohortMean; }
+    public synchronized double ownerCohortStd() { return ownerCohortStd; }
+    public synchronized double ownerNormThreshold() { return ownerNormThreshold; }
+
+    public synchronized void setOwnerCalibration(double cohortMean, double cohortStd, double normThreshold) {
+        this.ownerAsnorm = true;
+        this.ownerCohortMean = cohortMean;
+        this.ownerCohortStd = cohortStd <= 1e-6 ? 1 : cohortStd;
+        this.ownerNormThreshold = normThreshold;
+        save();
+    }
+
     public synchronized void put(String name, float[] embedding, boolean isOwner) {
         speakers.put(name, embedding);
         if (isOwner) ownerName = name;
@@ -56,6 +75,10 @@ public final class EmbeddingStore {
         speakers.clear();
         ownerName = null;
         ownerThreshold = 0;
+        ownerAsnorm = false;
+        ownerCohortMean = 0;
+        ownerCohortStd = 1;
+        ownerNormThreshold = 0;
         save();
     }
 
@@ -68,6 +91,10 @@ public final class EmbeddingStore {
             JSONObject root = new JSONObject(json);
             ownerName = root.optString("owner", null);
             ownerThreshold = root.optDouble("owner_threshold", 0);
+            ownerAsnorm = root.optBoolean("owner_asnorm", false);
+            ownerCohortMean = root.optDouble("owner_cohort_mean", 0);
+            ownerCohortStd = root.optDouble("owner_cohort_std", 1);
+            ownerNormThreshold = root.optDouble("owner_norm_threshold", 0);
             JSONObject sp = root.optJSONObject("speakers");
             if (sp != null) {
                 for (java.util.Iterator<String> it = sp.keys(); it.hasNext(); ) {
@@ -88,6 +115,12 @@ public final class EmbeddingStore {
             JSONObject root = new JSONObject();
             if (ownerName != null) root.put("owner", ownerName);
             if (ownerThreshold > 0) root.put("owner_threshold", ownerThreshold);
+            if (ownerAsnorm) {
+                root.put("owner_asnorm", true);
+                root.put("owner_cohort_mean", ownerCohortMean);
+                root.put("owner_cohort_std", ownerCohortStd);
+                root.put("owner_norm_threshold", ownerNormThreshold);
+            }
             JSONObject sp = new JSONObject();
             for (Map.Entry<String, float[]> e : speakers.entrySet()) {
                 JSONArray arr = new JSONArray();

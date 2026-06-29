@@ -19,10 +19,14 @@ import java.util.Map;
  */
 public final class SpeakerScorer {
 
+    private static final int MIN_COHORT_FOR_ASNORM = 8; // cohort 至少这么多才启用 AS-Norm
+    private static final int ASNORM_TOPK = 20;          // AS-Norm 取 top-K 个 cohort 分数
+
     private final SpeakerEmbeddingExtractor extractor;
     private final EmbeddingStore store;
+    private final CohortStore cohort;
     private final int sampleRate;
-    private final float defaultThreshold;  // 未自动标定时的回退阈值
+    private final float defaultThreshold;  // 未自动标定时的回退阈值（裸 cosine）
     private final float emaAlpha;
 
     private float smoothed = Float.NaN; // 段内 EMA 状态
@@ -33,9 +37,53 @@ public final class SpeakerScorer {
                 new SpeakerEmbeddingExtractorConfig(modelPath, numThreads, false, "cpu");
         this.extractor = new SpeakerEmbeddingExtractor(assetManager, cfg);
         this.store = new EmbeddingStore(storeDir);
+        this.cohort = new CohortStore(storeDir);
         this.sampleRate = sampleRate;
         this.defaultThreshold = threshold;
         this.emaAlpha = emaAlpha;
+    }
+
+    // ---------------- cohort / AS-Norm ----------------
+
+    /** 录入一条背景说话人 cohort 样本（其他人声）。cohort 越多越准。 */
+    public synchronized void addCohort(short[] pcm) { cohort.add(embed(pcm)); }
+    public synchronized int cohortSize() { return cohort.size(); }
+    public synchronized void clearCohort() { cohort.clear(); }
+    public synchronized boolean asnormActive() {
+        return store.ownerAsnorm() && cohort.size() >= MIN_COHORT_FOR_ASNORM;
+    }
+
+    private double[] cohortStats(float[] emb) { return cohortStats(emb, false); }
+
+    /** 计算 emb 相对 cohort 的 top-K 分数统计 {mean, std}；dropSelf 时剔除自匹配(≈1)。 */
+    private double[] cohortStats(float[] emb, boolean dropSelf) {
+        List<float[]> cs = cohort.list();
+        List<Double> sl = new ArrayList<>();
+        for (float[] g : cs) {
+            double c = cosine(emb, g);
+            if (dropSelf && c > 0.999) continue;
+            sl.add(c);
+        }
+        if (sl.isEmpty()) return new double[]{0, 1};
+        sl.sort(null);                                 // 升序
+        int k = Math.min(ASNORM_TOPK, sl.size());
+        double sum = 0;
+        for (int i = sl.size() - k; i < sl.size(); i++) sum += sl.get(i);
+        double mean = sum / k;
+        double var = 0;
+        for (int i = sl.size() - k; i < sl.size(); i++) var += (sl.get(i) - mean) * (sl.get(i) - mean);
+        var /= k;
+        double sd = Math.sqrt(var);
+        return new double[]{mean, sd <= 1e-6 ? 1 : sd};
+    }
+
+    /** AS-Norm 归一化分数：测试 emb 与主人质心。 */
+    private double asnormScore(float[] emb, float[] ownerCentroid) {
+        double cos = cosine(emb, ownerCentroid);
+        double[] st = cohortStats(emb);
+        double zTest = (cos - st[0]) / st[1];
+        double zEnroll = (cos - store.ownerCohortMean()) / store.ownerCohortStd();
+        return 0.5 * (zTest + zEnroll);
     }
 
     /** 当前生效阈值：优先用登记时自动标定的个性化阈值，否则用默认阈值。 */
@@ -91,7 +139,48 @@ public final class SpeakerScorer {
 
         store.put(name, centroid, true);
         store.setOwnerThreshold(thr);
+
+        // AS-Norm 校准（cohort 足够时）：用 cohort 把分数归一化，并按"主人 vs 冒充者"定归一化阈值
+        if (cohort.size() >= MIN_COHORT_FOR_ASNORM) {
+            double[] oc = cohortStats(centroid);            // 主人质心相对 cohort 的 μc/σc
+            List<Double> gen = new ArrayList<>();            // 真人(各登记窗)归一化分
+            for (float[] w : embs) {
+                double cos = cosine(w, centroid);
+                double[] sw = cohortStats(w);
+                gen.add(0.5 * ((cos - sw[0]) / sw[1] + (cos - oc[0]) / oc[1]));
+            }
+            List<Double> imp = new ArrayList<>();            // 冒充者(各 cohort)归一化分
+            for (float[] g : cohort.list()) {
+                double cos = cosine(g, centroid);
+                double[] sg = cohortStats(g, true);          // 剔除自匹配
+                imp.add(0.5 * ((cos - sg[0]) / sg[1] + (cos - oc[0]) / oc[1]));
+            }
+            double nth = chooseThreshold(gen, imp);
+            store.setOwnerCalibration(oc[0], oc[1], nth);
+        }
         return thr;
+    }
+
+    /** 两高斯交叉点近似(EER)：阈值卡在主人分布与冒充分布之间。 */
+    private static double chooseThreshold(List<Double> genuine, List<Double> impostor) {
+        if (genuine.isEmpty()) return 1.5;
+        double mg = mean(genuine), sg = std(genuine, mg);
+        if (impostor.isEmpty()) return mg - 2 * sg;
+        double mi = mean(impostor), si = std(impostor, mi);
+        if (sg <= 1e-6) sg = 1e-6;
+        if (si <= 1e-6) si = 1e-6;
+        double thr = (mg * si + mi * sg) / (sg + si); // 按标准差加权的中点
+        double lo = mi + 0.2, hi = mg - 0.2;
+        if (lo < hi) thr = Math.max(lo, Math.min(hi, thr));
+        return thr;
+    }
+
+    private static double mean(List<Double> xs) {
+        double s = 0; for (double x : xs) s += x; return s / xs.size();
+    }
+
+    private static double std(List<Double> xs, double m) {
+        double v = 0; for (double x : xs) v += (x - m) * (x - m); return Math.sqrt(v / xs.size());
     }
 
     /** 计算一段 PCM16 的归一化 embedding（内部先去首尾静音，登记/打分一致）。 */
@@ -172,6 +261,22 @@ public final class SpeakerScorer {
         if (sp.isEmpty()) return SpeakerInfo.unknown(0f, 0f);
 
         float[] emb = embed(pcm);
+
+        // AS-Norm 主人门控（cohort 足够时优先）：归一化分数更稳、阈值跨条件一致
+        String owner = store.ownerName();
+        if (asnormActive() && owner != null && sp.get(owner) != null) {
+            float[] oc = sp.get(owner);
+            float cosO = cosine(emb, oc);
+            double ns = asnormScore(emb, oc);
+            double nth = store.ownerNormThreshold();
+            boolean decided = ns >= nth;
+            float conf = (float) clamp01(1.0 / (1.0 + Math.exp(-(ns - nth))));
+            if (Float.isNaN(smoothed)) smoothed = conf; else smoothed = emaAlpha * conf + (1 - emaAlpha) * smoothed;
+            SpeakerInfo.State state = decided ? SpeakerInfo.State.DECIDED : SpeakerInfo.State.UNKNOWN;
+            return new SpeakerInfo(decided ? owner : null, smoothed, (float) (ns - nth), null,
+                    decided, state, cosO);
+        }
+
         String bestName = null, secondName = null;
         float bestCos = -2f, secondCos = -2f;
         for (Map.Entry<String, float[]> e : sp.entrySet()) {
@@ -206,6 +311,23 @@ public final class SpeakerScorer {
         if (o == null) return -1f;
         return cosine(embed(pcm), o);
     }
+
+    /** 自检分数：AS-Norm 启用时返回归一化分，否则裸 cosine；无主人返回 NaN。 */
+    public synchronized float ownerSelfScore(short[] pcm) {
+        String owner = store.ownerName();
+        if (owner == null) return Float.NaN;
+        float[] o = store.speakers().get(owner);
+        if (o == null) return Float.NaN;
+        float[] e = embed(pcm);
+        return asnormActive() ? (float) asnormScore(e, o) : cosine(e, o);
+    }
+
+    /** 自检对应的判定阈值（与 ownerSelfScore 同一量纲）。 */
+    public synchronized float ownerSelfThreshold() {
+        return asnormActive() ? (float) store.ownerNormThreshold() : effectiveThreshold();
+    }
+
+    private static double clamp01(double v) { return Math.max(0.0, Math.min(1.0, v)); }
 
     public void release() {
         try { extractor.release(); } catch (Throwable ignored) {}

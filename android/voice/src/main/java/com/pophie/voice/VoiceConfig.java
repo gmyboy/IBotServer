@@ -29,6 +29,10 @@ public final class VoiceConfig {
     public final boolean enableAec;
     public final boolean enableAgc;
 
+    // 主人判定稳健性
+    public final int minDecisionVoicedMs;  // 累计有声达到此值才给"确定"判定
+    public final int confirmRounds;         // 连续 N 次一致才翻转 owner 门控（迟滞防抖）
+
     // 输出门控
     public final GateMode gateMode;
 
@@ -56,6 +60,8 @@ public final class VoiceConfig {
         this.enableSystemDenoise = b.enableSystemDenoise;
         this.enableAec = b.enableAec;
         this.enableAgc = b.enableAgc;
+        this.minDecisionVoicedMs = b.minDecisionVoicedMs;
+        this.confirmRounds = b.confirmRounds;
         this.gateMode = b.gateMode;
         this.numThreads = b.numThreads;
         this.useAssets = b.useAssets;
@@ -87,7 +93,9 @@ public final class VoiceConfig {
 
         private boolean enableSystemDenoise = true;
         private boolean enableAec = true;
-        private boolean enableAgc = true;
+        private boolean enableAgc = false;     // 声纹验证默认关 AGC（增益泵动损伤特征）
+        private int minDecisionVoicedMs = 1000;
+        private int confirmRounds = 2;
 
         private GateMode gateMode = GateMode.REPORT;
 
@@ -113,6 +121,8 @@ public final class VoiceConfig {
         public Builder enableSystemDenoise(boolean v) { this.enableSystemDenoise = v; return this; }
         public Builder enableAec(boolean v) { this.enableAec = v; return this; }
         public Builder enableAgc(boolean v) { this.enableAgc = v; return this; }
+        public Builder minDecisionVoicedMs(int v) { this.minDecisionVoicedMs = v; return this; }
+        public Builder confirmRounds(int v) { this.confirmRounds = v; return this; }
         public Builder gateMode(GateMode v) { this.gateMode = v; return this; }
         public Builder numThreads(int v) { this.numThreads = v; return this; }
         public Builder useAssets(boolean v) { this.useAssets = v; return this; }

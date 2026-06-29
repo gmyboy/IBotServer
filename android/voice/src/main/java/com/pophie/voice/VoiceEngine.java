@@ -205,11 +205,40 @@ public final class VoiceEngine {
         return scorer.currentOwnerThreshold();
     }
 
-    /** 自检：用相同采集路径录一段，返回与主人的原始 cosine（无主人或失败返回 -1）。后台线程调用。 */
+    /** 自检：录一段返回自检分数（AS-Norm 启用时为归一化分，否则裸 cosine；无主人 NaN）。后台线程调用。 */
     public synchronized float verifyOwnerFromMic(int ms) throws Exception {
         ensureScorer();
         short[] pcm = captureMs(ms);
-        return scorer.ownerCosine(pcm);
+        return scorer.ownerSelfScore(pcm);
+    }
+
+    /** 自检分数对应的判定阈值（与 verifyOwnerFromMic 同量纲）。 */
+    public synchronized float ownerSelfThreshold() {
+        try { ensureScorer(); } catch (Exception e) { return 0f; }
+        return scorer.ownerSelfThreshold();
+    }
+
+    /** AS-Norm 是否已生效（cohort 足够且已标定）。 */
+    public synchronized boolean asnormActive() {
+        try { ensureScorer(); } catch (Exception e) { return false; }
+        return scorer.asnormActive();
+    }
+
+    /** 录入一条背景人声 cohort 样本（其他人）。后台线程调用。 */
+    public synchronized int addCohortFromMic(int ms) throws Exception {
+        ensureScorer();
+        short[] pcm = captureMs(ms);
+        scorer.addCohort(pcm);
+        return scorer.cohortSize();
+    }
+
+    public synchronized int cohortSize() {
+        try { ensureScorer(); } catch (Exception e) { return 0; }
+        return scorer.cohortSize();
+    }
+
+    public synchronized void clearCohort() {
+        try { ensureScorer(); scorer.clearCohort(); } catch (Exception ignored) {}
     }
 
     /** 用 MicSource(与运行时一致)同步采集 ms 毫秒音频。 */
@@ -339,22 +368,30 @@ public final class VoiceEngine {
         }
         SpeakerInfo info = scorer.score(window);
         seg.scoredOnce = true;
-        SpeakerInfo prev = seg.current;
         seg.current = info;
         postSpeakerUpdated(info);
 
-        // OWNER_ONLY：决策落定后处理挂起帧
+        // 质量门：累计有声不足时不做"确定"判定，避免短音频误判
+        boolean ownerNow = info.isOwner && seg.analysisMs >= config.minDecisionVoicedMs;
+        if (ownerNow) { seg.ownerStreak++; seg.nonOwnerStreak = 0; }
+        else { seg.nonOwnerStreak++; seg.ownerStreak = 0; }
+        // 迟滞：连续 N 次一致才翻转
+        if (!seg.ownerConfirmed && seg.ownerStreak >= config.confirmRounds) seg.ownerConfirmed = true;
+        else if (seg.ownerConfirmed && seg.nonOwnerStreak >= config.confirmRounds) seg.ownerConfirmed = false;
+
+        // OWNER_ONLY：确认主人才放行并补吐挂起帧；确认非主人则拦截
         if (config.gateMode == GateMode.OWNER_ONLY) {
-            boolean wasPending = prev == null || prev.state == SpeakerInfo.State.PENDING;
-            if (info.isOwner) {
+            if (seg.ownerConfirmed) {
+                seg.gateDecided = true;
+                seg.gateOpen = true;
                 if (!seg.pending.isEmpty()) {
                     for (short[] f : seg.pending) emitFrame(f, info);
                     seg.pending.clear();
                 }
-                seg.gateOpen = true;
-            } else {
-                seg.pending.clear();
+            } else if (seg.nonOwnerStreak >= config.confirmRounds) {
+                seg.gateDecided = true;
                 seg.gateOpen = false;
+                seg.pending.clear();
             }
         }
     }
@@ -365,9 +402,9 @@ public final class VoiceEngine {
             emitFrame(outFrame, cur);
             return;
         }
-        // OWNER_ONLY
-        if (cur.state == SpeakerInfo.State.PENDING && !seg.scoredOnce) {
-            seg.pending.add(outFrame);      // 决策前挂起
+        // OWNER_ONLY：未定前挂起(防吞首字)，定了再放行/丢弃
+        if (!seg.gateDecided) {
+            seg.pending.add(outFrame);
         } else if (seg.gateOpen) {
             emitFrame(outFrame, cur);
         } // 否则丢弃
@@ -435,6 +472,11 @@ public final class VoiceEngine {
         int analysisMs = 0;
         int msSinceScore = 0;
         boolean scoredOnce = false;
+        // 迟滞 / 质量门
+        int ownerStreak = 0;
+        int nonOwnerStreak = 0;
+        boolean ownerConfirmed = false;
+        boolean gateDecided = false;   // OWNER_ONLY 是否已定放行/拦截
         boolean gateOpen = false;
         SpeakerInfo current = SpeakerInfo.pending();
     }

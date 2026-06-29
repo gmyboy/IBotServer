@@ -35,7 +35,7 @@ public class MainActivity extends AppCompatActivity {
     private GateMode mode = GateMode.REPORT;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    private TextView status, speaker, meter, log, enrollHint, verifyResult;
+    private TextView status, speaker, meter, log, enrollHint, verifyResult, cohortInfo;
     private volatile boolean enrolling = false;
     private long bytes = 0;
     private final StringBuilder logBuf = new StringBuilder();
@@ -52,6 +52,7 @@ public class MainActivity extends AppCompatActivity {
         enrollHint = findViewById(R.id.enrollHint);
         enrollHint.setText("登记主人：请连续说约 8 秒（几句话，可把下面这句读两遍），系统会自动算阈值，只需一次：\n「" + ENROLL_TEXT + "」");
         verifyResult = findViewById(R.id.verifyResult);
+        cohortInfo = findViewById(R.id.cohortInfo);
 
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
@@ -59,7 +60,10 @@ public class MainActivity extends AppCompatActivity {
         Button btnClear = findViewById(R.id.btnClear);
         Button btnMode = findViewById(R.id.btnMode);
         Button btnVerify = findViewById(R.id.btnVerify);
+        Button btnCohort = findViewById(R.id.btnCohort);
         btnVerify.setOnClickListener(v -> verifyOwner());
+        btnCohort.setOnClickListener(v -> addCohort());
+        refreshCohortInfo();
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -182,6 +186,7 @@ public class MainActivity extends AppCompatActivity {
                     enrollHint.setText("✓ 已登记主人。自动阈值=" + String.format(java.util.Locale.ROOT, "%.3f", thr)
                             + "\n登记用语：「" + ENROLL_TEXT + "」");
                     verifyResult.setText("自检：—（可点【自检相似度】验证）");
+                    refreshCohortInfo();
                 });
             } catch (Throwable t) {
                 Log.e(TAG, "enroll failed", t);
@@ -209,14 +214,16 @@ public class MainActivity extends AppCompatActivity {
             try {
                 engine.stop();
                 float c = engine.verifyOwnerFromMic(2500);
-                float th = engine.ownerThreshold();
+                float th = engine.ownerSelfThreshold();
+                boolean as = engine.asnormActive();
                 ui.post(() -> {
-                    if (c < 0) {
+                    if (Float.isNaN(c)) {
                         verifyResult.setText("自检：尚未登记主人");
                     } else {
                         boolean pass = c >= th;
+                        String kind = as ? "AS-Norm分" : "cosine";
                         verifyResult.setText(String.format(java.util.Locale.ROOT,
-                                "自检 cosine=%.3f  阈值=%.3f  → %s", c, th, pass ? "判为主人 ✓" : "判为非主人 ✗"));
+                                "自检 %s=%.3f  阈值=%.3f  → %s", kind, c, th, pass ? "判为主人 ✓" : "判为非主人 ✗"));
                     }
                     status.setText("状态：自检完成");
                 });
@@ -224,6 +231,44 @@ public class MainActivity extends AppCompatActivity {
                 Log.e(TAG, "verify failed", t);
                 ui.post(() -> toast("自检失败：" + t.getMessage()));
             }
+        }).start();
+    }
+
+    /** 录入一条背景人声(其他人)，构建 cohort。 */
+    private void addCohort() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            toast("缺少录音权限");
+            return;
+        }
+        if (enrolling) { toast("正在登记，请稍候"); return; }
+        status.setText("录入背景人声：录音 2.5s，请让【其他人】说一句…");
+        toast("请让其他人说一句(2.5s)");
+        new Thread(() -> {
+            try {
+                engine.stop();
+                int n = engine.addCohortFromMic(2500);
+                ui.post(() -> {
+                    toast("已录入背景人声，cohort=" + n);
+                    refreshCohortInfo();
+                });
+            } catch (Throwable t) {
+                Log.e(TAG, "cohort failed", t);
+                ui.post(() -> toast("录入失败：" + t.getMessage()));
+            }
+        }).start();
+    }
+
+    private void refreshCohortInfo() {
+        new Thread(() -> {
+            int n = engine.cohortSize();
+            boolean as = engine.asnormActive();
+            boolean owner = engine.isOwnerEnrolled();
+            String extra;
+            if (as) extra = "（AS-Norm 已生效）";
+            else if (n >= 8 && owner) extra = "（cohort 足够，请【重新登记主人】以启用 AS-Norm）";
+            else extra = "（需 ≥8 个不同人，且在录完 cohort 后登记主人才生效）";
+            ui.post(() -> cohortInfo.setText("cohort：" + n + extra));
         }).start();
     }
 

@@ -74,6 +74,14 @@ new Thread(() -> {
 Demo（`:voicedemo`）：开始/停止、登记主人(4s)、清空声纹、切 REPORT/OWNER_ONLY；
 实时看 speaking、`SpeakerInfo(conf/margin/state/主人)`、输出字节、段日志。
 
+## 准确率：AS-Norm + cohort（行业做法，强烈建议）
+裸 cosine 跨条件漂移大、固定阈值不稳。本 SDK 支持 **AS-Norm 分数归一化 + 按冒充者自动定阈**：
+1. **先录 cohort**（其他人的声音）：`addCohortFromMic(2500)` 录 **≥8 个不同的人**（Demo「录入背景人声」按钮）。cohort 越多越准。
+2. **再登记主人**：`enrollOwnerFromMic(8000)`。此时 SDK 用 cohort 做 AS-Norm，并按"主人 vs cohort(冒充者)"分布的交叉点(近似 EER)**自动定归一化阈值**并持久化。
+3. 运行时打分走 **AS-Norm 归一化分数 + 该阈值**（`asnormActive()` 为 true 时）；cohort 不足/未标定则自动回退到裸 cosine + μ−2σ。
+- 顺序很重要：**cohort 要在登记主人之前录**；若先登记了主人再补 cohort，请**重新登记主人**以触发标定。
+- 其它稳健性：默认**关 AGC**（增益泵动伤声纹）；**质量门**(`minDecisionVoicedMs`，累计有声不足不下确定判定)；**迟滞**(`confirmRounds`，连续 N 次一致才翻转 OWNER_ONLY 门控)。
+
 ## 声纹匹配率注意（重要）
 - **自动阈值（推荐，按人自适应，只记一次）**：用 `enrollOwnerFromMic(8000)` 让主人连续说 ~8s(几句话)，
   SDK 切多窗算 embedding 质心 + 主人内部自相似分布，自动定阈值 `μ-2σ`(钳制 [0.30,0.60]) 并持久化；
