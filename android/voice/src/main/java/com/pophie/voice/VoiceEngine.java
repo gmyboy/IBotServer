@@ -188,6 +188,51 @@ public final class VoiceEngine {
         scorer.enroll(name, samples, false);
     }
 
+    /**
+     * 用与运行时完全相同的采集路径(同 MicSource + 同 NS/AEC/AGC)登记主人，
+     * 避免登记/识别前处理不一致导致的低匹配率。请在后台线程调用；调用前应先 stop()。
+     * @return 实际采集的样本数
+     */
+    public synchronized int enrollOwnerFromMic(int ms) throws Exception {
+        ensureScorer();
+        short[] pcm = captureMs(ms);
+        scorer.enroll(OWNER_NAME, java.util.Collections.singletonList(pcm), true);
+        return pcm.length;
+    }
+
+    /** 自检：用相同采集路径录一段，返回与主人的原始 cosine（无主人或失败返回 -1）。后台线程调用。 */
+    public synchronized float verifyOwnerFromMic(int ms) throws Exception {
+        ensureScorer();
+        short[] pcm = captureMs(ms);
+        return scorer.ownerCosine(pcm);
+    }
+
+    /** 用 MicSource(与运行时一致)同步采集 ms 毫秒音频。 */
+    private short[] captureMs(int ms) throws Exception {
+        final int target = config.sampleRate * ms / 1000;
+        final List<short[]> frames = java.util.Collections.synchronizedList(new ArrayList<>());
+        final int[] count = {0};
+        final Object lock = new Object();
+        MicSource mic = new MicSource(context, config.sampleRate, frameSamples,
+                config.enableSystemDenoise, config.enableAec, config.enableAgc);
+        boolean ok = mic.start(frame -> {
+            frames.add(frame);
+            synchronized (lock) { count[0] += frame.length; lock.notifyAll(); }
+        });
+        if (!ok) throw new Exception("麦克风启动失败");
+        long deadline = System.currentTimeMillis() + ms + 2000;
+        try {
+            synchronized (lock) {
+                while (count[0] < target && System.currentTimeMillis() < deadline) {
+                    lock.wait(200);
+                }
+            }
+        } finally {
+            mic.stop();
+        }
+        return WavUtil.concat(frames);
+    }
+
     public synchronized boolean isOwnerEnrolled() {
         try { ensureScorer(); } catch (Exception e) { return false; }
         return scorer.isOwnerEnrolled();
@@ -327,7 +372,7 @@ public final class VoiceEngine {
         if (seg == null) return;
         short[] pcm = WavUtil.concat(seg.outFrames);
         // 末次打分（整段）
-        SpeakerInfo finalSpeaker = seg.current != null ? seg.current : SpeakerInfo.unknown(0f);
+        SpeakerInfo finalSpeaker = seg.current != null ? seg.current : SpeakerInfo.unknown(0f, 0f);
         float[] emb = null;
         try {
             short[] full = WavUtil.concat(seg.outFrames); // 与登记一致的信号

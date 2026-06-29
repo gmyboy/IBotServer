@@ -85,6 +85,19 @@
         </LinearLayout>
 
         <Button
+            android:id="@+id/btnVerify"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="自检相似度(2.5s)" />
+
+        <TextView
+            android:id="@+id/verifyResult"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="15sp"
+            android:text="自检：—" />
+
+        <Button
             android:id="@+id/btnMode"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

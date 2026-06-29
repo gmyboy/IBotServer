@@ -37,9 +37,11 @@ public final class SpeakerScorer {
         this.emaAlpha = emaAlpha;
     }
 
-    /** 计算一段 PCM16 的归一化 embedding。 */
+    /** 计算一段 PCM16 的归一化 embedding（内部先去首尾静音，登记/打分一致）。 */
     public float[] embed(short[] pcm) {
-        float[] f = WavUtil.pcm16ToFloat(pcm);
+        short[] voiced = trimSilence(pcm);
+        if (voiced.length < sampleRate / 4) voiced = pcm; // < 0.25s 用原段，避免裁空
+        float[] f = WavUtil.pcm16ToFloat(voiced);
         OnlineStream stream = extractor.createStream();
         try {
             stream.acceptWaveform(f, sampleRate);
@@ -58,9 +60,7 @@ public final class SpeakerScorer {
         int n = 0;
         for (short[] s : samples) {
             if (s == null || s.length == 0) continue;
-            short[] trimmed = trimSilence(s);
-            if (trimmed.length < sampleRate / 2) trimmed = s; // 太短则用原段
-            float[] e = embed(trimmed);
+            float[] e = embed(s); // embed 内部已去静音
             if (avg == null) avg = new float[e.length];
             for (int i = 0; i < e.length; i++) avg[i] += e[i];
             n++;
@@ -112,7 +112,7 @@ public final class SpeakerScorer {
      */
     public synchronized SpeakerInfo score(short[] pcm) {
         Map<String, float[]> sp = store.speakers();
-        if (sp.isEmpty()) return SpeakerInfo.unknown(0f);
+        if (sp.isEmpty()) return SpeakerInfo.unknown(0f, 0f);
 
         float[] emb = embed(pcm);
         String bestName = null, secondName = null;
@@ -137,7 +137,16 @@ public final class SpeakerScorer {
         boolean isOwner = decided && bestName != null && bestName.equals(store.ownerName());
         SpeakerInfo.State state = decided ? SpeakerInfo.State.DECIDED : SpeakerInfo.State.UNKNOWN;
         String name = decided ? bestName : null;
-        return new SpeakerInfo(name, smoothed, margin, secondName, isOwner, state);
+        return new SpeakerInfo(name, smoothed, margin, secondName, isOwner, state, bestCos);
+    }
+
+    /** 自检：返回一段音频与主人 embedding 的原始 cosine；无主人返回 -1。 */
+    public synchronized float ownerCosine(short[] pcm) {
+        String owner = store.ownerName();
+        if (owner == null) return -1f;
+        float[] o = store.speakers().get(owner);
+        if (o == null) return -1f;
+        return cosine(embed(pcm), o);
     }
 
     public void release() {

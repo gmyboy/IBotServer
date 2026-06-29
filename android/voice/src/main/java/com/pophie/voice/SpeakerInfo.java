@@ -27,28 +27,32 @@ public final class SpeakerInfo {
     public final boolean isOwner;
     /** 判定状态。 */
     public final State state;
+    /** 最优匹配的原始 cosine（未校准，便于真机标定阈值）。 */
+    public final float rawScore;
 
     public SpeakerInfo(String name, float confidence, float margin,
-                       String runnerUp, boolean isOwner, State state) {
+                       String runnerUp, boolean isOwner, State state, float rawScore) {
         this.name = name;
         this.confidence = confidence;
         this.margin = margin;
         this.runnerUp = runnerUp;
         this.isOwner = isOwner;
         this.state = state;
+        this.rawScore = rawScore;
     }
 
     public static SpeakerInfo pending() {
-        return new SpeakerInfo(null, 0f, 0f, null, false, State.PENDING);
+        return new SpeakerInfo(null, 0f, 0f, null, false, State.PENDING, 0f);
     }
 
-    public static SpeakerInfo unknown(float confidence) {
-        return new SpeakerInfo(null, confidence, 0f, null, false, State.UNKNOWN);
+    public static SpeakerInfo unknown(float confidence, float rawScore) {
+        return new SpeakerInfo(null, confidence, 0f, null, false, State.UNKNOWN, rawScore);
     }
 
     @Override
     public String toString() {
         return "SpeakerInfo{name=" + name + ", conf=" + String.format(java.util.Locale.ROOT, "%.2f", confidence)
+                + ", raw=" + String.format(java.util.Locale.ROOT, "%.2f", rawScore)
                 + ", margin=" + String.format(java.util.Locale.ROOT, "%.2f", margin)
                 + ", runnerUp=" + runnerUp + ", owner=" + isOwner + ", state=" + state + "}";
     }

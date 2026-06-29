@@ -1,11 +1,7 @@
 package com.pophie.voice.demo;
 
 import android.Manifest;
-import android.annotation.SuppressLint;
 import android.content.pm.PackageManager;
-import android.media.AudioFormat;
-import android.media.AudioRecord;
-import android.media.MediaRecorder;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -26,8 +22,6 @@ import com.pophie.voice.VoiceError;
 import com.pophie.voice.VoiceListener;
 import com.pophie.voice.VoiceSegment;
 
-import java.util.Collections;
-
 /** 语音 SDK 调试 Demo。 */
 public class MainActivity extends AppCompatActivity {
 
@@ -41,7 +35,7 @@ public class MainActivity extends AppCompatActivity {
     private GateMode mode = GateMode.REPORT;
     private final Handler ui = new Handler(Looper.getMainLooper());
 
-    private TextView status, speaker, meter, log, enrollHint;
+    private TextView status, speaker, meter, log, enrollHint, verifyResult;
     private volatile boolean enrolling = false;
     private long bytes = 0;
     private final StringBuilder logBuf = new StringBuilder();
@@ -57,12 +51,15 @@ public class MainActivity extends AppCompatActivity {
         log = findViewById(R.id.log);
         enrollHint = findViewById(R.id.enrollHint);
         enrollHint.setText("登记主人时请朗读这句话：\n「" + ENROLL_TEXT + "」");
+        verifyResult = findViewById(R.id.verifyResult);
 
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
         Button btnEnroll = findViewById(R.id.btnEnroll);
         Button btnClear = findViewById(R.id.btnClear);
         Button btnMode = findViewById(R.id.btnMode);
+        Button btnVerify = findViewById(R.id.btnVerify);
+        btnVerify.setOnClickListener(v -> verifyOwner());
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -135,7 +132,8 @@ public class MainActivity extends AppCompatActivity {
             public void onSpeakerUpdated(SpeakerInfo spk) {
                 speaker.setText("说话人：" + spk.state
                         + (spk.name != null ? " " + spk.name : "")
-                        + String.format(java.util.Locale.ROOT, " conf=%.2f margin=%.2f", spk.confidence, spk.margin)
+                        + String.format(java.util.Locale.ROOT, " conf=%.2f raw=%.2f margin=%.2f",
+                                spk.confidence, spk.rawScore, spk.margin)
                         + (spk.isOwner ? " [主人]" : ""));
             }
 
@@ -174,14 +172,15 @@ public class MainActivity extends AppCompatActivity {
         toast("请朗读提示语，准备录音");
         new Thread(() -> {
             try {
-                Thread.sleep(800); // 给用户一点准备时间
+                engine.stop();      // 避免与运行时麦克风冲突
+                Thread.sleep(800);  // 给用户一点准备时间
                 ui.post(() -> status.setText("登记录音中(4s)…请朗读提示语"));
-                short[] pcm = record(4000);
-                engine.enrollOwner(Collections.singletonList(pcm));
+                // 走与运行时一致的采集路径登记，提升匹配率
+                int n = engine.enrollOwnerFromMic(4000);
                 ui.post(() -> {
-                    toast("主人登记完成（" + (pcm.length / SR) + "s）");
-                    status.setText("状态：已登记主人，可点【开始】");
-                    enrollHint.setText("✓ 已登记主人。登记用语：\n「" + ENROLL_TEXT + "」");
+                    toast("主人登记完成（" + (n / SR) + "s）");
+                    status.setText("状态：已登记主人，可点【开始】或【自检】");
+                    enrollHint.setText("✓ 已登记主人。\n登记用语：「" + ENROLL_TEXT + "」");
                 });
             } catch (Throwable t) {
                 Log.e(TAG, "enroll failed", t);
@@ -195,26 +194,34 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    @SuppressLint("MissingPermission")
-    private short[] record(int ms) {
-        int min = AudioRecord.getMinBufferSize(SR, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
-        AudioRecord r = new AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                SR, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, Math.max(min * 2, SR));
-        int total = SR * ms / 1000;
-        short[] out = new short[total];
-        r.startRecording();
-        int off = 0;
-        while (off < total) {
-            int n = r.read(out, off, total - off);
-            if (n <= 0) break;
-            off += n;
+    /** 自检：录 2.5s，显示与主人的原始 cosine，便于标定阈值。 */
+    private void verifyOwner() {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            toast("缺少录音权限");
+            return;
         }
-        r.stop();
-        r.release();
-        if (off == total) return out;
-        short[] trimmed = new short[off];
-        System.arraycopy(out, 0, trimmed, 0, off);
-        return trimmed;
+        if (enrolling) { toast("正在登记，请稍候"); return; }
+        status.setText("自检：录音 2.5s，请正常说一句话…");
+        toast("请正常说一句话(2.5s)");
+        new Thread(() -> {
+            try {
+                engine.stop();
+                float c = engine.verifyOwnerFromMic(2500);
+                ui.post(() -> {
+                    if (c < 0) {
+                        verifyResult.setText("自检：尚未登记主人");
+                    } else {
+                        verifyResult.setText(String.format(java.util.Locale.ROOT,
+                                "自检 cosine=%.3f（当前阈值 0.5，≥阈值即判主人）", c));
+                    }
+                    status.setText("状态：自检完成");
+                });
+            } catch (Throwable t) {
+                Log.e(TAG, "verify failed", t);
+                ui.post(() -> toast("自检失败：" + t.getMessage()));
+            }
+        }).start();
     }
 
     private void toast(String s) {
