@@ -39,6 +39,7 @@ from .database import (
 )
 from .llm import chat_json, parse_chat_json, iter_chat_stream, LLMError
 from .streaming_text import StreamingReplyTextExtractor
+from . import intent
 from .memory import (
     L1_BUFFER, ingest_user_input, list_memories, recall_for_response,
     format_memories_for_prompt, delete_memory,
@@ -660,6 +661,27 @@ async def stt_stream_ws(websocket: WebSocket):
             evt = await asyncio.to_thread(session.get_event, 0.25)
             if evt is None:
                 continue
+            # final 文本过停止意图判定（关键词初筛 + LLM 确认）；命中则推送 stop_speaking
+            # 指令让端侧立即停止语音交互、退出聆听。confirm_stop_intent 内含同步 LLM
+            # httpx 调用，用 to_thread 包住避免阻塞事件循环。
+            if evt.get("type") == "final" and intent.maybe_stop_intent(evt.get("text", "")):
+                final_text = evt.get("text", "")
+                stop, reason = await asyncio.to_thread(
+                    intent.confirm_stop_intent, final_text,
+                )
+                if stop:
+                    log.info(
+                        "[stt/stream] 停止意图命中 text=%r reason=%s", final_text, reason,
+                    )
+                    await websocket.send_text(json.dumps({
+                        "type": "stop_speaking",
+                        "text": final_text,
+                        "reason": reason,
+                    }, ensure_ascii=False))
+                    # 仍把 final 发出去（端侧日志可见）；端侧收到 stop_speaking 会立即
+                    # 退出聆听，不会再处理该 final 走对话。
+                    await websocket.send_text(json.dumps(evt, ensure_ascii=False))
+                    continue
             await websocket.send_text(json.dumps(evt, ensure_ascii=False))
             if evt.get("type") == "error":
                 stopped = True
