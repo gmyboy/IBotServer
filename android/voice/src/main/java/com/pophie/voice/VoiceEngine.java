@@ -446,6 +446,7 @@ public final class VoiceEngine {
     private void emitFrame(short[] pcm, SpeakerInfo spk) {
         VoiceListener l = listener;
         if (l == null) return;
+        l.onAudioFrameSync(pcm, config.sampleRate);
         float[] f = WavUtil.pcm16ToFloat(pcm);
         main.post(() -> l.onAudioFrame(pcm, f, config.sampleRate, spk));
     }

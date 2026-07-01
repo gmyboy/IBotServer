@@ -1,12 +1,14 @@
 package com.pophie.voice.demo;
 
 import android.Manifest;
+import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -14,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
+import com.google.android.material.switchmaterial.SwitchMaterial;
 import com.pophie.voice.GateMode;
 import com.pophie.voice.SpeakerInfo;
 import com.pophie.voice.VoiceConfig;
@@ -21,24 +24,38 @@ import com.pophie.voice.VoiceEngine;
 import com.pophie.voice.VoiceError;
 import com.pophie.voice.VoiceListener;
 import com.pophie.voice.VoiceSegment;
+import com.pophie.voice.WavUtil;
+import com.pophie.voice.server.VoiceServerBridge;
+import com.pophie.voice.server.VoiceServerConfig;
+import com.pophie.voice.server.VoiceServerListener;
 
-/** 语音 SDK 调试 Demo。 */
+/**
+ * 语音 SDK Demo：端侧 {@link VoiceEngine} + {@link VoiceServerBridge}（实时 STT / chat/stream）。
+ */
 public class MainActivity extends AppCompatActivity {
 
     private static final String TAG = "VoiceDemo";
     private static final int SR = 16000;
+    private static final String PREFS = "voice_demo";
+    private static final String KEY_SERVER_URL = "server_url";
+    private static final String KEY_SESSION_ID = "session_id";
 
-    /** 登记主人时让用户朗读的固定提示语。 */
     private static final String ENROLL_TEXT = "你好，我是你的主人，以后主要由我来跟你说话，记住我的声音就好";
 
     private VoiceEngine engine;
     private GateMode mode = GateMode.REPORT;
     private final Handler ui = new Handler(Looper.getMainLooper());
+    private VoiceServerBridge serverBridge;
 
     private TextView status, speaker, meter, log, enrollHint, verifyResult, cohortInfo;
+    private TextView serverStatus, sttResult, replyResult;
+    private EditText serverUrl;
+    private SwitchMaterial switchRealtimeStt;
+    private SwitchMaterial switchChat;
     private volatile boolean enrolling = false;
     private long bytes = 0;
     private final StringBuilder logBuf = new StringBuilder();
+    private final StringBuilder chatReplyBuf = new StringBuilder();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,6 +70,19 @@ public class MainActivity extends AppCompatActivity {
         enrollHint.setText("登记主人：请连续说约 8 秒（几句话，可把下面这句读两遍），系统会自动算阈值，只需一次：\n「" + ENROLL_TEXT + "」");
         verifyResult = findViewById(R.id.verifyResult);
         cohortInfo = findViewById(R.id.cohortInfo);
+        serverUrl = findViewById(R.id.serverUrl);
+        switchRealtimeStt = findViewById(R.id.switchRealtimeStt);
+        switchChat = findViewById(R.id.switchChat);
+        serverStatus = findViewById(R.id.serverStatus);
+        sttResult = findViewById(R.id.sttResult);
+        replyResult = findViewById(R.id.replyResult);
+
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String savedUrl = prefs.getString(KEY_SERVER_URL, "http://192.168.23.156:9900/");
+        String sessionId = prefs.getString(KEY_SESSION_ID, "");
+
+        serverUrl.setText(savedUrl);
+        initServerBridge(savedUrl, sessionId);
 
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
@@ -61,8 +91,21 @@ public class MainActivity extends AppCompatActivity {
         Button btnMode = findViewById(R.id.btnMode);
         Button btnVerify = findViewById(R.id.btnVerify);
         Button btnCohort = findViewById(R.id.btnCohort);
+        Button btnTestServer = findViewById(R.id.btnTestServer);
         btnVerify.setOnClickListener(v -> verifyOwner());
         btnCohort.setOnClickListener(v -> addCohort());
+        btnTestServer.setOnClickListener(v -> testServerConnection());
+
+        serverUrl.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus) persistServerUrl();
+        });
+
+        switchRealtimeStt.setOnCheckedChangeListener((btn, checked) -> {
+            if (serverBridge != null) serverBridge.setRealtimeEnabled(checked);
+        });
+        switchChat.setOnCheckedChangeListener((btn, checked) -> {
+            if (serverBridge != null) serverBridge.setChatEnabled(checked);
+        });
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -74,18 +117,22 @@ public class MainActivity extends AppCompatActivity {
 
         btnStart.setOnClickListener(v -> {
             if (enrolling) { toast("正在登记主人，请稍候"); return; }
+            persistServerUrl();
             status.setText("状态：检查是否已登记主人…");
-            // isOwnerEnrolled() 可能触发模型下载，放后台线程
             new Thread(() -> {
                 boolean enrolled = engine.isOwnerEnrolled();
                 ui.post(() -> {
                     if (!enrolled) {
-                        toast("尚未登记主人，请先点【登记主人(4s)】并朗读提示语");
+                        toast("尚未登记主人，请先点【登记主人】");
                         status.setText("状态：未登记主人");
                         enrollHint.setText("⚠ 请先登记主人（连续说约 8 秒）：\n「" + ENROLL_TEXT + "」");
                         return;
                     }
                     bytes = 0;
+                    syncServerFlags();
+                    if (switchRealtimeStt.isChecked()) {
+                        serverBridge.connectRealtime();
+                    }
                     engine.start();
                     status.setText("状态：运行中");
                 });
@@ -93,6 +140,7 @@ public class MainActivity extends AppCompatActivity {
         });
         btnStop.setOnClickListener(v -> {
             engine.stop();
+            serverBridge.disconnect();
             status.setText("状态：已停止");
         });
         btnEnroll.setOnClickListener(v -> enrollOwner());
@@ -105,11 +153,134 @@ public class MainActivity extends AppCompatActivity {
         btnMode.setOnClickListener(v -> {
             mode = (mode == GateMode.REPORT) ? GateMode.OWNER_ONLY : GateMode.REPORT;
             ((Button) v).setText("门控：" + mode + "（点击切换）");
+            serverBridge.setGateMode(mode);
             engine.stop();
+            serverBridge.disconnect();
             buildEngine();
             toast("已切换为 " + mode + "，请重新开始");
             status.setText("状态：未启动");
         });
+    }
+
+    private void initServerBridge(String baseUrl, String sessionId) {
+        VoiceServerConfig config = new VoiceServerConfig.Builder()
+                .baseUrl(baseUrl)
+                .build();
+        serverBridge = new VoiceServerBridge(config);
+        serverBridge.setSessionId(sessionId);
+        serverBridge.setGateMode(mode);
+        serverBridge.setListener(new VoiceServerListener() {
+            @Override
+            public void onSttConnecting() {
+                sttResult.setText("STT：连接中…");
+            }
+
+            @Override
+            public void onSttReady() {
+                sttResult.setText("STT：等待说话…");
+            }
+
+            @Override
+            public void onSttPartial(String text) {
+                sttResult.setText("STT：" + text);
+            }
+
+            @Override
+            public void onSttFinal(String text) {
+                String line = text.isEmpty() ? "（空）" : text;
+                sttResult.setText("STT：" + line + " ✓");
+                appendSttLog("final→" + line);
+            }
+
+            @Override
+            public void onSttError(String message) {
+                sttResult.setText("STT：错误 " + message);
+                toast("实时 STT：" + message);
+            }
+
+            @Override
+            public void onChatSpeakChunk(String chunk) {
+                chatReplyBuf.append(chunk);
+                replyResult.setText("回复：" + chatReplyBuf);
+            }
+
+            @Override
+            public void onChatComplete(String replyText) {
+                chatReplyBuf.setLength(0);
+                String line = replyText.isEmpty() ? "（静默）" : replyText;
+                replyResult.setText("回复：" + line);
+                appendSttLog("chat→" + line);
+                persistSessionId(serverBridge.getSessionId());
+            }
+
+            @Override
+            public void onChatError(String message) {
+                replyResult.setText("回复：失败 " + message);
+                appendSttLog("chat ✗ " + message);
+            }
+
+            @Override
+            public void onChatSkipped(String reason) {
+                appendSttLog("chat 跳过：" + reason);
+            }
+
+            @Override
+            public void onConnectionTested(boolean speechEnabled, String sid, String error) {
+                if (error != null) {
+                    serverStatus.setText("服务：失败 " + error);
+                    toast("连接失败：" + error);
+                    return;
+                }
+                persistSessionId(sid);
+                String speech = speechEnabled ? "speech=开" : "speech=关";
+                serverStatus.setText("服务：OK  " + speech + "  session=" + sid);
+                toast(speechEnabled ? "连接正常" : "speech 未启用");
+            }
+
+            @Override
+            public void onSegmentLogged(long logId, boolean isOwner, String sttText) {
+                String owner = isOwner ? "主人" : "非主人";
+                appendSttLog("流水#" + logId + " " + owner
+                        + (sttText != null && !sttText.isEmpty() ? " →" + sttText : ""));
+            }
+
+            @Override
+            public void onSegmentLogError(String message) {
+                appendSttLog("流水✗ " + message);
+            }
+        });
+        syncServerFlags();
+    }
+
+    private void syncServerFlags() {
+        serverBridge.setRealtimeEnabled(switchRealtimeStt.isChecked());
+        serverBridge.setChatEnabled(switchChat.isChecked());
+    }
+
+    private void persistServerUrl() {
+        String url = serverUrl.getText().toString().trim();
+        serverBridge.setBaseUrl(url);
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_SERVER_URL, url).apply();
+    }
+
+    private void persistSessionId(String id) {
+        serverBridge.setSessionId(id == null ? "" : id);
+        getSharedPreferences(PREFS, MODE_PRIVATE)
+                .edit()
+                .putString(KEY_SESSION_ID, serverBridge.getSessionId())
+                .apply();
+    }
+
+    private void testServerConnection() {
+        persistServerUrl();
+        serverStatus.setText("服务：检测中…");
+        serverBridge.testConnection();
+    }
+
+    private void appendSttLog(String line) {
+        logBuf.insert(0, line + "\n");
+        if (logBuf.length() > 4000) logBuf.setLength(4000);
+        log.setText(logBuf.toString());
     }
 
     private void buildEngine() {
@@ -118,18 +289,31 @@ public class MainActivity extends AppCompatActivity {
                 .gateMode(mode)
                 .enableSystemDenoise(true)
                 .enableAec(true)
+                .vadThreshold(0.68f)
+                .maxSilenceMs(400)
+                .minSpeechMs(120)
                 .build();
         engine = new VoiceEngine(this, cfg);
+        VoiceListener serverListener = serverBridge.createVoiceListener();
         engine.setListener(new VoiceListener() {
             @Override
             public void onSpeakingStateChanged(boolean speaking) {
-                status.setText("状态：" + (speaking ? "有人说话" : "静音"));
+                serverListener.onSpeakingStateChanged(speaking);
+                status.setText("状态：" + (speaking ? "有人说话（近场 VAD）" : "静音"));
+            }
+
+            @Override
+            public void onAudioFrameSync(short[] pcm16, int sampleRate) {
+                serverListener.onAudioFrameSync(pcm16, sampleRate);
             }
 
             @Override
             public void onAudioFrame(short[] pcm16, float[] pcmFloat, int sampleRate, SpeakerInfo spk) {
                 bytes += (long) pcm16.length * 2;
-                meter.setText("输出字节：" + bytes);
+                double rms = WavUtil.rms(pcm16);
+                String near = serverBridge.isNearField(rms) ? " ✓近场" : "";
+                meter.setText(String.format(java.util.Locale.ROOT,
+                        "输出字节：%d  RMS=%.0f%s", bytes, rms, near));
             }
 
             @Override
@@ -143,10 +327,19 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onSegmentEnd(VoiceSegment seg) {
+                if (switchChat.isChecked() && seg.durationMs >= 300) {
+                    chatReplyBuf.setLength(0);
+                    replyResult.setText("回复：…");
+                }
+                serverListener.onSegmentEnd(seg);
+                String spkLabel = "—";
+                if (seg.speaker != null) {
+                    spkLabel = seg.speaker.name != null ? seg.speaker.name : seg.speaker.state.toString();
+                }
                 String line = String.format(java.util.Locale.ROOT,
                         "段 %dms 说话人=%s conf=%.2f owner=%s\n",
                         seg.durationMs,
-                        seg.speaker != null && seg.speaker.name != null ? seg.speaker.name : seg.speaker.state.toString(),
+                        spkLabel,
                         seg.speaker != null ? seg.speaker.confidence : 0f,
                         seg.speaker != null && seg.speaker.isOwner);
                 logBuf.insert(0, line);
@@ -175,14 +368,14 @@ public class MainActivity extends AppCompatActivity {
         toast("请连续说约 8 秒，准备录音");
         new Thread(() -> {
             try {
-                engine.stop();      // 避免与运行时麦克风冲突
-                Thread.sleep(800);  // 给用户一点准备时间
+                engine.stop();
+                serverBridge.disconnect();
+                Thread.sleep(800);
                 ui.post(() -> status.setText("登记录音中(8s)…请连续说话"));
-                // 走与运行时一致的采集路径登记 + 自动标定阈值
                 double thr = engine.enrollOwnerFromMic(8000);
                 ui.post(() -> {
                     toast(String.format(java.util.Locale.ROOT, "登记完成，自动阈值=%.3f", thr));
-                    status.setText("状态：已登记主人，可点【开始】或【自检】");
+                    status.setText("状态：已登记主人，可点【开始】");
                     enrollHint.setText("✓ 已登记主人。自动阈值=" + String.format(java.util.Locale.ROOT, "%.3f", thr)
                             + "\n登记用语：「" + ENROLL_TEXT + "」");
                     verifyResult.setText("自检：—（可点【自检相似度】验证）");
@@ -200,7 +393,6 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    /** 自检：录 2.5s，显示与主人的原始 cosine，便于标定阈值。 */
     private void verifyOwner() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -213,6 +405,7 @@ public class MainActivity extends AppCompatActivity {
         new Thread(() -> {
             try {
                 engine.stop();
+                serverBridge.disconnect();
                 float c = engine.verifyOwnerFromMic(2500);
                 float th = engine.ownerSelfThreshold();
                 boolean as = engine.asnormActive();
@@ -234,7 +427,6 @@ public class MainActivity extends AppCompatActivity {
         }).start();
     }
 
-    /** 录入一条背景人声(其他人)，构建 cohort。 */
     private void addCohort() {
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -247,6 +439,7 @@ public class MainActivity extends AppCompatActivity {
         new Thread(() -> {
             try {
                 engine.stop();
+                serverBridge.disconnect();
                 int n = engine.addCohortFromMic(2500);
                 ui.post(() -> {
                     toast("已录入背景人声，cohort=" + n);
@@ -281,5 +474,6 @@ public class MainActivity extends AppCompatActivity {
     protected void onDestroy() {
         super.onDestroy();
         if (engine != null) engine.stop();
+        if (serverBridge != null) serverBridge.disconnect();
     }
 }

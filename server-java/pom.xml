@@ -22,7 +22,7 @@
         <httpclient5.version>5.3.1</httpclient5.version>
         <commons-io.version>2.15.1</commons-io.version>
         <commons-collections4.version>4.4</commons-collections4.version>
-        <dashscope.version>2.18.2</dashscope.version>
+        <dashscope.version>2.22.5</dashscope.version>
     </properties>
 
     <dependencies>
@@ -125,6 +125,11 @@
             <groupId>com.alibaba</groupId>
             <artifactId>dashscope-sdk-java</artifactId>
             <version>${dashscope.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.springframework.boot</groupId>
+            <artifactId>spring-boot-starter-websocket</artifactId>
         </dependency>
     </dependencies>
 

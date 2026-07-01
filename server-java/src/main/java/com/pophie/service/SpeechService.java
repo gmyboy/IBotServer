@@ -1,5 +1,12 @@
 package com.pophie.service;
 
+import com.alibaba.dashscope.audio.omni.OmniRealtimeCallback;
+import com.alibaba.dashscope.audio.omni.OmniRealtimeConfig;
+import com.alibaba.dashscope.audio.omni.OmniRealtimeConversation;
+import com.alibaba.dashscope.audio.omni.OmniRealtimeModality;
+import com.alibaba.dashscope.audio.omni.OmniRealtimeParam;
+import com.alibaba.dashscope.audio.omni.OmniRealtimeTranscriptionParam;
+import com.google.gson.JsonObject;
 import com.pophie.config.RuntimeConfigService;
 import com.pophie.schema.AudioPayload;
 import com.pophie.schema.SttResult;
@@ -15,7 +22,9 @@ import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,6 +48,8 @@ public class SpeechService {
     private static final Logger log = LoggerFactory.getLogger("pophie.speech");
 
     public static final String DASHSCOPE_TTS_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
+    /** Qwen3-ASR-Realtime WebSocket（与 TTS 的 /inference 端点不同） */
+    public static final String DASHSCOPE_STT_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
     public static final String DEFAULT_VOICE_ID = "gentle_female";
 
     // voice_id -> [DashScope API voice, 显示名]
@@ -135,6 +146,9 @@ public class SpeechService {
     private Map<String, Object> speechCfg() { return cfg.speech(); }
     private Map<String, Object> sttCfg() { return RuntimeConfigService.sub(speechCfg(), "stt"); }
     private Map<String, Object> ttsCfg() { return RuntimeConfigService.sub(speechCfg(), "tts"); }
+
+    /** 供 SttRealtimeSession 读取 STT 配置。 */
+    Map<String, Object> sttCfgInternal() { return sttCfg(); }
 
     // ---------- 元信息 ----------
 
@@ -464,8 +478,7 @@ public class SpeechService {
     }
 
     /**
-     * Qwen3-ASR 实时识别。采样率校验、分片、重试、情感解析对应 _transcribe_dashscope。
-     * 使用 DashScope Recognition 流式接口（计划标注的 SDK 版本核对点）。
+     * Qwen3-ASR 实时识别（OmniRealtime WebSocket）。对应 Python _transcribe_dashscope。
      */
     private SttResult transcribeDashscope(byte[] wavBytes) {
         Map<String, Object> stt = sttCfg();
@@ -489,14 +502,10 @@ public class SpeechService {
         for (int attempt = 0; attempt < maxRetries; attempt++) {
             long t0 = System.currentTimeMillis();
             try {
-                String raw = doRecognition(apiKey, model, sampleRate, pcm, chunkBytes);
-                String[] parsed = stripEmotionTags(raw);
-                String txt = parsed[0];
-                String emotion = parsed[1];
-                VoiceProsody voice = voiceFromEmotion(emotion);
-                log.info("[speech] STT ok in {}ms text={} emotion={} model={}",
-                        System.currentTimeMillis() - t0, txt, emotion, model);
-                return new SttResult(txt, voice);
+                SttResult result = doOmniRealtimeRecognition(apiKey, model, sampleRate, pcm, chunkBytes, stt);
+                log.info("[speech] STT ok in {}ms text={} model={}",
+                        System.currentTimeMillis() - t0, result.getText(), model);
+                return result;
             } catch (Exception e) {
                 lastErr = new RuntimeException(e.getMessage(), e);
                 log.warn("[speech] STT 失败 attempt={}/{}: {}", attempt + 1, maxRetries, e.getMessage());
@@ -508,39 +517,118 @@ public class SpeechService {
         throw new RuntimeException("STT 识别失败: " + (lastErr == null ? "" : lastErr.getMessage()), lastErr);
     }
 
-    private String doRecognition(String apiKey, String model, int sampleRate, byte[] pcm, int chunkBytes)
+    private SttResult doOmniRealtimeRecognition(String apiKey, String model, int sampleRate,
+                                              byte[] pcm, int chunkBytes, Map<String, Object> stt)
             throws Exception {
-        com.alibaba.dashscope.audio.asr.recognition.RecognitionParam param =
-                com.alibaba.dashscope.audio.asr.recognition.RecognitionParam.builder()
-                        .apiKey(apiKey)
-                        .model(model)
-                        .format("pcm")
-                        .sampleRate(sampleRate)
-                        .build();
+        String language = RuntimeConfigService.str(stt, "language", "zh");
+        String wsUrl = RuntimeConfigService.str(stt, "base_url", DASHSCOPE_STT_WS_URL).trim();
+        if (wsUrl.isEmpty()) wsUrl = DASHSCOPE_STT_WS_URL;
+        double connectDelay = RuntimeConfigService.dbl(stt, "connect_delay_sec", 0.1);
+        int timeoutSec = RuntimeConfigService.integer(stt, "timeout", 30);
 
-        List<ByteBuffer> frames = new ArrayList<>();
-        for (int i = 0; i < pcm.length; i += chunkBytes) {
-            int end = Math.min(i + chunkBytes, pcm.length);
-            frames.add(ByteBuffer.wrap(pcm, i, end - i));
-        }
+        AtomicReference<String> text = new AtomicReference<>("");
+        AtomicReference<String> emotion = new AtomicReference<>(null);
+        AtomicReference<String> error = new AtomicReference<>(null);
+        CountDownLatch done = new CountDownLatch(1);
 
-        com.alibaba.dashscope.audio.asr.recognition.Recognition recognizer =
-                new com.alibaba.dashscope.audio.asr.recognition.Recognition();
-        StringBuilder sb = new StringBuilder();
-        AtomicReference<Exception> err = new AtomicReference<>();
-        CountDownLatch latch = new CountDownLatch(1);
+        OmniRealtimeParam param = OmniRealtimeParam.builder()
+                .model(model)
+                .url(wsUrl)
+                .apikey(apiKey)
+                .header("OpenAI-Beta", "realtime=v1")
+                .build();
 
-        io.reactivex.Flowable<ByteBuffer> source = io.reactivex.Flowable.fromIterable(frames);
-        recognizer.streamCall(param, source).blockingForEach(result -> {
-            if (result.getSentence() != null && result.getSentence().getText() != null) {
-                if (result.isSentenceEnd()) {
-                    sb.append(result.getSentence().getText());
+        OmniRealtimeConversation conversation = new OmniRealtimeConversation(param, new OmniRealtimeCallback() {
+            @Override
+            public void onOpen() {}
+
+            @Override
+            public void onEvent(JsonObject message) {
+                if (!message.has("type")) return;
+                String type = message.get("type").getAsString();
+                switch (type) {
+                    case "conversation.item.input_audio_transcription.completed" -> {
+                        if (message.has("transcript")) {
+                            text.set(message.get("transcript").getAsString().trim());
+                        }
+                        if (message.has("emotion") && !message.get("emotion").isJsonNull()) {
+                            emotion.set(message.get("emotion").getAsString());
+                        }
+                        done.countDown();
+                    }
+                    case "conversation.item.input_audio_transcription.text" -> {
+                        StringBuilder partial = new StringBuilder();
+                        if (message.has("text")) partial.append(message.get("text").getAsString());
+                        if (message.has("stash")) partial.append(message.get("stash").getAsString());
+                        if (!partial.toString().trim().isEmpty()) {
+                            text.set(partial.toString().trim());
+                        }
+                        if (message.has("emotion") && !message.get("emotion").isJsonNull()) {
+                            emotion.set(message.get("emotion").getAsString());
+                        }
+                    }
+                    case "error" -> {
+                        error.set(message.has("message")
+                                ? message.get("message").getAsString()
+                                : message.toString());
+                        done.countDown();
+                    }
+                    default -> { }
                 }
             }
+
+            @Override
+            public void onClose(int code, String reason) {
+                done.countDown();
+            }
         });
-        if (err.get() != null) throw err.get();
-        latch.countDown();
-        return sb.toString().trim();
+
+        try {
+            conversation.connect();
+
+            OmniRealtimeTranscriptionParam transcriptionParam = new OmniRealtimeTranscriptionParam();
+            transcriptionParam.setLanguage(language);
+            transcriptionParam.setInputSampleRate(sampleRate);
+            transcriptionParam.setInputAudioFormat("pcm");
+
+            OmniRealtimeConfig config = OmniRealtimeConfig.builder()
+                    .modalities(Collections.singletonList(OmniRealtimeModality.TEXT))
+                    .enableInputAudioTranscription(true)
+                    .enableTurnDetection(false)
+                    .transcriptionConfig(transcriptionParam)
+                    .build();
+            conversation.updateSession(config);
+
+            if (connectDelay > 0) {
+                Thread.sleep((long) (connectDelay * 1000));
+            }
+
+            for (int i = 0; i < pcm.length; i += chunkBytes) {
+                int end = Math.min(i + chunkBytes, pcm.length);
+                conversation.appendAudio(Base64.getEncoder().encodeToString(
+                        Arrays.copyOfRange(pcm, i, end)));
+            }
+            conversation.commit();
+            conversation.endSession(timeoutSec);
+
+            if (!done.await(timeoutSec * 1000L + 5000L, TimeUnit.MILLISECONDS)) {
+                throw new RuntimeException("STT 识别超时");
+            }
+            if (error.get() != null) {
+                throw new RuntimeException(error.get());
+            }
+
+            String[] parsed = stripEmotionTags(text.get());
+            String txt = parsed[0];
+            String taggedEmotion = parsed[1];
+            String finalEmotion = emotion.get() != null ? emotion.get() : taggedEmotion;
+            return new SttResult(txt, voiceFromEmotion(finalEmotion));
+        } finally {
+            try {
+                conversation.close();
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     private static boolean truthy(String s) {

@@ -1,5 +1,6 @@
 package com.pophie.entity;
 
+import com.pophie.db.DbTables;
 import com.pophie.util.TimeUtil;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -14,10 +15,10 @@ import lombok.Setter;
 
 /** reminders 表（对应 database.py reminders）。 */
 @Entity
-@Table(name = "reminders", indexes = {
-        @Index(name = "idx_rem_status", columnList = "status,remind_at"),
-        @Index(name = "idx_rem_user", columnList = "user_id"),
-        @Index(name = "idx_rem_robot", columnList = "robot_id"),
+@Table(name = DbTables.REM_REMINDERS, indexes = {
+        @Index(name = "pb_rem_idx_status", columnList = "status,remind_at"),
+        @Index(name = "pb_rem_idx_user", columnList = "user_id"),
+        @Index(name = "pb_rem_idx_robot", columnList = "robot_id"),
 })
 @Getter
 @Setter

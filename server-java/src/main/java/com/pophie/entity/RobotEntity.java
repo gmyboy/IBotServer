@@ -1,5 +1,6 @@
 package com.pophie.entity;
 
+import com.pophie.db.DbTables;
 import com.pophie.util.TimeUtil;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -11,7 +12,7 @@ import lombok.Setter;
 
 /** robots 表（对应 database.py robots）。robot_id 作主键。 */
 @Entity
-@Table(name = "robots")
+@Table(name = DbTables.CORE_ROBOTS)
 @Getter
 @Setter
 public class RobotEntity {

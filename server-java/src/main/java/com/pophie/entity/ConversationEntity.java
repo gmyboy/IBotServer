@@ -1,5 +1,6 @@
 package com.pophie.entity;
 
+import com.pophie.db.DbTables;
 import com.pophie.util.TimeUtil;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -14,9 +15,9 @@ import lombok.Setter;
 
 /** conversations 表（对应 database.py conversations）。 */
 @Entity
-@Table(name = "conversations", indexes = {
-        @Index(name = "idx_conv_session", columnList = "session_id"),
-        @Index(name = "idx_conv_robot_session", columnList = "robot_id,session_id"),
+@Table(name = DbTables.CHAT_CONVERSATIONS, indexes = {
+        @Index(name = "pb_chat_idx_session", columnList = "session_id"),
+        @Index(name = "pb_chat_idx_robot_session", columnList = "robot_id,session_id"),
 })
 @Getter
 @Setter

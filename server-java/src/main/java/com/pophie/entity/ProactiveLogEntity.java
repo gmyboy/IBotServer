@@ -1,5 +1,6 @@
 package com.pophie.entity;
 
+import com.pophie.db.DbTables;
 import com.pophie.util.TimeUtil;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -13,7 +14,7 @@ import lombok.Setter;
 
 /** proactive_log 表（对应 database.py proactive_log）。 */
 @Entity
-@Table(name = "proactive_log")
+@Table(name = DbTables.PRO_PROACTIVE_LOG)
 @Getter
 @Setter
 public class ProactiveLogEntity {

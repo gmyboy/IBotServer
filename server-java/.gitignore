@@ -2,6 +2,7 @@ target/
 logs/
 *.log
 .env
+src/main/resources/application-local.properties
 config.yaml
 !config.example.yaml
 .idea/

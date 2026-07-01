@@ -6,6 +6,7 @@ import com.pophie.repository.ConversationRepository;
 import com.pophie.repository.MemoryRepository;
 import com.pophie.repository.OwnerProfileRepository;
 import com.pophie.repository.ProactiveLogRepository;
+import com.pophie.repository.VoiceSegmentLogRepository;
 import com.pophie.repository.ReminderRepository;
 import com.pophie.repository.RobotRepository;
 import com.pophie.util.TimeUtil;
@@ -31,16 +32,20 @@ public class RobotService {
     private final ConversationRepository conversationRepo;
     private final ReminderRepository reminderRepo;
     private final ProactiveLogRepository proactiveLogRepo;
+    private final VoiceSegmentLogRepository voiceSegmentLogRepo;
     private final OwnerProfileRepository ownerRepo;
 
     public RobotService(RobotRepository robotRepo, MemoryRepository memoryRepo,
                         ConversationRepository conversationRepo, ReminderRepository reminderRepo,
-                        ProactiveLogRepository proactiveLogRepo, OwnerProfileRepository ownerRepo) {
+                        ProactiveLogRepository proactiveLogRepo,
+                        VoiceSegmentLogRepository voiceSegmentLogRepo,
+                        OwnerProfileRepository ownerRepo) {
         this.robotRepo = robotRepo;
         this.memoryRepo = memoryRepo;
         this.conversationRepo = conversationRepo;
         this.reminderRepo = reminderRepo;
         this.proactiveLogRepo = proactiveLogRepo;
+        this.voiceSegmentLogRepo = voiceSegmentLogRepo;
         this.ownerRepo = ownerRepo;
     }
 
@@ -165,12 +170,13 @@ public class RobotService {
     /** 对应 delete_robot_all（按固定表顺序删除，返回各表 rowcount）。 */
     public Map<String, Integer> deleteRobotAll(String robotId) {
         Map<String, Integer> deleted = new LinkedHashMap<>();
-        deleted.put("memories", memoryRepo.deleteByRobotId(robotId));
-        deleted.put("conversations", conversationRepo.deleteByRobotId(robotId));
-        deleted.put("reminders", reminderRepo.deleteByRobotId(robotId));
-        deleted.put("proactive_log", proactiveLogRepo.deleteByRobotId(robotId));
-        deleted.put("owner_profiles", ownerRepo.deleteByRobotId(robotId));
-        deleted.put("robots", robotRepo.existsById(robotId) ? deleteRobot(robotId) : 0);
+        deleted.put("pb_mem_memories", memoryRepo.deleteByRobotId(robotId));
+        deleted.put("pb_chat_conversations", conversationRepo.deleteByRobotId(robotId));
+        deleted.put("pb_rem_reminders", reminderRepo.deleteByRobotId(robotId));
+        deleted.put("pb_pro_proactive_log", proactiveLogRepo.deleteByRobotId(robotId));
+        deleted.put("pb_voice_segment_logs", voiceSegmentLogRepo.deleteByRobotId(robotId));
+        deleted.put("pb_core_owner_profiles", ownerRepo.deleteByRobotId(robotId));
+        deleted.put("pb_core_robots", robotRepo.existsById(robotId) ? deleteRobot(robotId) : 0);
         return deleted;
     }
 

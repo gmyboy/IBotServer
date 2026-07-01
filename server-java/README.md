@@ -11,7 +11,7 @@ DashScope STT-TTS / 定时提醒 / 主动感知 / 主人档案 / Admin 后台 / 
 
 ## 架构分层
 - `base/ configuration/ exception/ filter/ redis/ utils/ annotation/`：脚手架基础设施（包名 `com.pophie`）
-- `entity/ repository/`：6 张表 JPA 映射与数据访问（memories/conversations/reminders/proactive_log/robots/owner_profiles）
+- `entity/ repository/`：JPA 实体与数据访问（表名 `pb_{模块}_{表名}`，见 `com.pophie.db.DbTables`）
 - `config/`：`RuntimeConfigService` —— 移植 `config.py`，读写 `config.yaml`，支持 admin 热更新
 - `schema/`：DTO、枚举、表情/状态/手势映射、`REPLY_JSON_INSTRUCTION`（逐字对应 `schemas.py`）
 - `service/`：`LlmService`/`MemoryService`/`ReminderService`/`ProactiveService`/`SpeechService`/`ChatService`/`RobotService`
@@ -42,7 +42,7 @@ docker compose up -d --build
 - **提醒调度**：`@Scheduled(fixedDelay=10s)` 扫描到期 pending，与原 10 秒轮询一致。
 - **时间格式**：`created_at`/`updated_at` 用 `yyyy-MM-dd HH:mm:ss`（对应 SQLite CURRENT_TIMESTAMP）；
   `remind_at`/`fired_at`/`last_seen_at` 用 ISO8601（对应 Python `_now_iso()`）。
-- **语音 DashScope**：TTS 用 `dashscope-sdk-java` ttsv2 `SpeechSynthesizer`；STT 用 `Recognition` 流式接口。
+- **语音 DashScope**：TTS 用 `dashscope-sdk-java` ttsv2 `SpeechSynthesizer`；STT 用 `OmniRealtimeConversation`（`wss://.../api-ws/v1/realtime`，SDK ≥ 2.22.5）。
   STT 实时模型/情感字段在不同 SDK 版本可能有差异 —— 已确认编译通过，**首次接入真实 DashScope key 时需联调验证**。
 
 ## 测试

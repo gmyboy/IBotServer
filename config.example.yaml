@@ -33,6 +33,7 @@ speech:
   enabled: true
   stt:
     model: qwen3-asr-flash-realtime
+    base_url: wss://dashscope.aliyuncs.com/api-ws/v1/realtime
     language: zh
     sample_rate: 16000
     chunk_bytes: 3200

@@ -1,0 +1,78 @@
+# macOS 本机部署：数据库/缓存/日志/配置落到 ${DATA_ROOT}，适配 Docker Desktop。
+# 用法（在 server-java 目录）：
+#   docker compose -f docker-compose.macos.yml up -d --build
+# DATA_ROOT/HOST_PORT/MYSQL_HOST_PORT/REDIS_HOST_PORT 由同目录 .env 提供（deploy/macos-deploy.sh 会自动写入）。
+# 端口绑定到 0.0.0.0，方便同一局域网内用本机 IP 访问。
+services:
+  app:
+    build: .
+    image: pophie-server:latest
+    container_name: pophie-app
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${DB_NAME}?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
+      SPRING_DATASOURCE_USERNAME: ${DB_USER}
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
+      SPRING_DATA_REDIS_HOST: redis
+      SPRING_DATA_REDIS_PORT: 6379
+      SPRING_DATA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      APP_CRYPTO_AES_KEY: ${AES_KEY}
+      SPRING_JPA_HIBERNATE_DDL_AUTO: ${JPA_DDL_AUTO:-update}
+      POPHIE_CONFIG_PATH: /app/config.yaml
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+    ports:
+      - "0.0.0.0:${HOST_PORT:-9901}:8000"
+    volumes:
+      - ${DATA_ROOT}/logs:/app/logs
+      - ${DATA_ROOT}/config.yaml:/app/config.yaml
+    networks:
+      - pophie-net
+
+  mysql:
+    image: mysql:8.0
+    container_name: pophie-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${DB_NAME}
+      MYSQL_USER: ${DB_USER}
+      MYSQL_PASSWORD: ${DB_PASSWORD}
+    ports:
+      - "0.0.0.0:${MYSQL_HOST_PORT:-9902}:3306"
+    volumes:
+      - ${DATA_ROOT}/mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pophie-net
+
+  redis:
+    image: redis:7-alpine
+    container_name: pophie-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD} --appendonly yes
+    ports:
+      - "0.0.0.0:${REDIS_HOST_PORT:-9903}:6379"
+    volumes:
+      - ${DATA_ROOT}/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - pophie-net
+
+networks:
+  pophie-net: {}

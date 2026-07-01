@@ -19,4 +19,5 @@ dependencyResolutionManagement {
 rootProject.name = "Pophie"
 include(":app")
 include(":voice")
+include(":voice-server")
 include(":voicedemo")

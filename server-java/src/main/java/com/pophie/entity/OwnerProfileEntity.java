@@ -1,5 +1,6 @@
 package com.pophie.entity;
 
+import com.pophie.db.DbTables;
 import com.pophie.util.TimeUtil;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -11,7 +12,7 @@ import lombok.Setter;
 
 /** owner_profiles 表（对应 database.py owner_profiles）。robot_id 作主键。 */
 @Entity
-@Table(name = "owner_profiles")
+@Table(name = DbTables.CORE_OWNER_PROFILES)
 @Getter
 @Setter
 public class OwnerProfileEntity {

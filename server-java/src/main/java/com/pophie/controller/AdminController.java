@@ -6,6 +6,7 @@ import com.pophie.exception.ApiException;
 import com.pophie.repository.ConversationRepository;
 import com.pophie.repository.MemoryRepository;
 import com.pophie.repository.ProactiveLogRepository;
+import com.pophie.repository.VoiceSegmentLogRepository;
 import com.pophie.repository.ReminderRepository;
 import com.pophie.schema.AdminModels;
 import com.pophie.service.ChatService;
@@ -50,11 +51,13 @@ public class AdminController {
     private final ConversationRepository conversationRepo;
     private final ReminderRepository reminderRepo;
     private final ProactiveLogRepository proactiveLogRepo;
+    private final VoiceSegmentLogRepository voiceSegmentLogRepo;
 
     public AdminController(RuntimeConfigService cfg, RobotService robotService, MemoryService memory,
                            SpeechService speech, ChatService chatService, MemoryRepository memoryRepo,
                            ConversationRepository conversationRepo, ReminderRepository reminderRepo,
-                           ProactiveLogRepository proactiveLogRepo) {
+                           ProactiveLogRepository proactiveLogRepo,
+                           VoiceSegmentLogRepository voiceSegmentLogRepo) {
         this.cfg = cfg;
         this.robotService = robotService;
         this.memory = memory;
@@ -64,6 +67,7 @@ public class AdminController {
         this.conversationRepo = conversationRepo;
         this.reminderRepo = reminderRepo;
         this.proactiveLogRepo = proactiveLogRepo;
+        this.voiceSegmentLogRepo = voiceSegmentLogRepo;
     }
 
     private String adminToken() {
@@ -203,16 +207,17 @@ public class AdminController {
         }
         Map<String, Object> deleted = new LinkedHashMap<>();
         if (scope.equals("memories") || scope.equals("all")) {
-            deleted.put("memories", memoryRepo.deleteByRobotId(robotId));
+            deleted.put("pb_mem_memories", memoryRepo.deleteByRobotId(robotId));
         }
         if (scope.equals("conversations") || scope.equals("all")) {
-            deleted.put("conversations", conversationRepo.deleteByRobotId(robotId));
+            deleted.put("pb_chat_conversations", conversationRepo.deleteByRobotId(robotId));
         }
         if (scope.equals("reminders") || scope.equals("all")) {
-            deleted.put("reminders", reminderRepo.deleteByRobotId(robotId));
+            deleted.put("pb_rem_reminders", reminderRepo.deleteByRobotId(robotId));
         }
         if (scope.equals("all")) {
-            deleted.put("proactive_log", proactiveLogRepo.deleteByRobotId(robotId));
+            deleted.put("pb_pro_proactive_log", proactiveLogRepo.deleteByRobotId(robotId));
+            deleted.put("pb_voice_segment_logs", voiceSegmentLogRepo.deleteByRobotId(robotId));
         }
         if (scope.equals("memories") || scope.equals("all")) {
             memory.l1().clear(robotId);

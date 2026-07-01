@@ -23,6 +23,12 @@ public interface VoiceListener {
     /** 一段语音结束（含整段 WAV / embedding）。 */
     default void onSegmentEnd(VoiceSegment segment) {}
 
+    /**
+     * 采集线程同步回调，用于低延迟上行（如实时 STT）。
+     * 与 {@link #onAudioFrame} 不同，不在主线程 post，且仅包含近场放行帧。
+     */
+    default void onAudioFrameSync(short[] pcm16, int sampleRate) {}
+
     /** 错误。 */
     default void onError(VoiceError error) {}
 }

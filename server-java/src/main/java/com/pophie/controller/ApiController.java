@@ -21,17 +21,22 @@ import com.pophie.schema.TickRequest;
 import com.pophie.schema.TtsRequest;
 import com.pophie.schema.TtsResponse;
 import com.pophie.schema.VoiceProsody;
+import com.pophie.schema.VoiceSegmentSttPatchRequest;
+import com.pophie.schema.VoiceSegmentUploadRequest;
+import com.pophie.schema.VoiceSegmentUploadResponse;
 import com.pophie.service.ChatService;
 import com.pophie.service.MemoryService;
 import com.pophie.service.ProactiveService;
 import com.pophie.service.ReminderService;
 import com.pophie.service.RobotService;
 import com.pophie.service.SpeechService;
+import com.pophie.service.VoiceSegmentLogService;
 import com.pophie.util.JsonUtil;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
@@ -66,11 +71,12 @@ public class ApiController {
     private final MemoryRepository memoryRepo;
     private final ConversationRepository conversationRepo;
     private final ProactiveLogRepository proactiveLogRepo;
+    private final VoiceSegmentLogService voiceSegmentLog;
 
     public ApiController(ChatService chatService, MemoryService memory, ReminderService reminder,
                          ProactiveService proactive, SpeechService speech, RobotService robotService,
                          MemoryRepository memoryRepo, ConversationRepository conversationRepo,
-                         ProactiveLogRepository proactiveLogRepo) {
+                         ProactiveLogRepository proactiveLogRepo, VoiceSegmentLogService voiceSegmentLog) {
         this.chatService = chatService;
         this.memory = memory;
         this.reminder = reminder;
@@ -80,6 +86,7 @@ public class ApiController {
         this.memoryRepo = memoryRepo;
         this.conversationRepo = conversationRepo;
         this.proactiveLogRepo = proactiveLogRepo;
+        this.voiceSegmentLog = voiceSegmentLog;
     }
 
     @GetMapping("/health")
@@ -229,6 +236,34 @@ public class ApiController {
         } catch (Exception e) {
             throw new ApiException(400, e.getMessage());
         }
+    }
+
+    /** 客户端上传语音段流水（含主人/非主人声纹标记、音频、STT 文本）。 */
+    @PostMapping("/voice/segments")
+    public VoiceSegmentUploadResponse uploadVoiceSegment(@RequestBody VoiceSegmentUploadRequest req) {
+        return voiceSegmentLog.ingest(req);
+    }
+
+    @GetMapping("/voice/segments")
+    public Map<String, Object> listVoiceSegments(@RequestParam(required = false) String robotId,
+                                                 @RequestParam(required = false) String userId,
+                                                 @RequestParam(required = false) String sessionId,
+                                                 @RequestParam(required = false) Boolean isOwner,
+                                                 @RequestParam(defaultValue = "50") int limit) {
+        return voiceSegmentLog.list(robotId, userId, sessionId, isOwner, limit);
+    }
+
+    @GetMapping("/voice/segments/{id}")
+    public Map<String, Object> getVoiceSegment(@PathVariable long id,
+                                               @RequestParam(defaultValue = "false") boolean includeAudio) {
+        return voiceSegmentLog.getById(id, includeAudio);
+    }
+
+    /** 补写段流水 STT 文本（final 晚于入库时由客户端调用）。 */
+    @PatchMapping("/voice/segments/{id}/stt")
+    public VoiceSegmentUploadResponse patchVoiceSegmentStt(@PathVariable long id,
+                                                           @RequestBody VoiceSegmentSttPatchRequest req) {
+        return voiceSegmentLog.patchStt(id, req);
     }
 
     @PostMapping("/tts")

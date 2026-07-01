@@ -1,5 +1,6 @@
 package com.pophie.entity;
 
+import com.pophie.db.DbTables;
 import com.pophie.util.TimeUtil;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
@@ -18,11 +19,11 @@ import lombok.Setter;
  * 由业务层按需解析，可逐端点复刻"解析/不解析"的契约差异。
  */
 @Entity
-@Table(name = "memories", indexes = {
-        @Index(name = "idx_mem_layer", columnList = "user_id,layer"),
-        @Index(name = "idx_mem_session", columnList = "session_id"),
-        @Index(name = "idx_mem_robot_layer", columnList = "robot_id,layer"),
-        @Index(name = "idx_mem_robot_session", columnList = "robot_id,session_id"),
+@Table(name = DbTables.MEM_MEMORIES, indexes = {
+        @Index(name = "pb_mem_idx_layer", columnList = "user_id,layer"),
+        @Index(name = "pb_mem_idx_session", columnList = "session_id"),
+        @Index(name = "pb_mem_idx_robot_layer", columnList = "robot_id,layer"),
+        @Index(name = "pb_mem_idx_robot_session", columnList = "robot_id,session_id"),
 })
 @Getter
 @Setter
