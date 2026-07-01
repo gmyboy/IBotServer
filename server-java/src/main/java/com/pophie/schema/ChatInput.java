@@ -10,4 +10,6 @@ public class ChatInput {
     private PerceptionInput perception;
     private String voiceId;
     private Boolean skipTts;
+    /** 为 true 时 chat/stream 附带服务端 TTS 音频事件（tts_meta/tts_chunk）。 */
+    private Boolean serverTts;
 }

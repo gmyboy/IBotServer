@@ -15,6 +15,13 @@ public interface VoiceServerListener {
 
     default void onChatSpeakChunk(String chunk) {}
 
+    /** 服务端通知即将/正在回复（不阻断采集）。 */
+    default void onReplyNotify(String phase, String text, String source) {}
+
+    default void onReplyPlayStart(int seq) {}
+
+    default void onReplyPlayEnd(int seq) {}
+
     default void onChatComplete(String replyText) {}
 
     default void onChatError(String message) {}

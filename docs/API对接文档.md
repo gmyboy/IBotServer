@@ -26,7 +26,7 @@
 7. GET  /api/proactive_messages → 轮询主动消息（可选；播放同样走 §3.6.1）
 ```
 
-**语音对话时序（推荐）：**
+**语音对话时序（官方 App / Web，二次 TTS 请求）：**
 
 ```
 客户端                    服务端
@@ -35,6 +35,19 @@
   |-- POST /api/tts/stream ------------>|
   |<-- NDJSON: meta/chunk*/done --------|  （首包 ~500ms 可开口）
 ```
+
+**实时语音对话时序（VoiceDemo / `:voice-server`，服务端 TTS 随流推送）：**
+
+```
+客户端                         服务端
+  |-- WS /api/stt/stream (实时 STT) ---->|  （并行，不阻断采集）
+  |-- POST /api/chat/stream ------------>|
+  |     skip_tts=true, server_tts=true   |
+  |<-- NDJSON: reply/speak/tts_*/done --|  （文本通知 + TTS 音频）
+  |-- WS /api/reply/notify (长连接) ---->|  （主动发言/提醒，同协议）
+```
+
+> 架构说明见 [回复通知与服务端 TTS 架构](./回复通知与服务端TTS架构.md)。
 
 ### 1.2 身份与会话
 
@@ -51,6 +64,7 @@
 |--------|--------|------|
 | `chat.defer_side_tasks` | `true` | 记忆写入与提醒提取放后台；为 `true` 时 `/api/chat` 响应中 `memory_flow`、`l1_frames` 恒为 `[]` |
 | `chat.inline_tts` | `true` | 为 `true` 且未设 `skip_tts` 时 `/api/chat` 内嵌完整 TTS（`output.audio` 为 MP3）；**推荐客户端设 `skip_tts: true` 并走 `/api/tts/stream`** |
+| `chat.stream_server_tts` | `true` | `POST /api/chat/stream` 未显式传 `input.server_tts` 时，是否在 NDJSON 中附带 `tts_meta` / `tts_chunk` |
 | `speech.enabled` | `true` | 关闭后无 STT/TTS，`/api/stt`、`/api/tts`、`/api/tts/stream` 返回 503 |
 | `speech.tts.base_url` | `wss://dashscope.aliyuncs.com/api-ws/v1/inference` | CosyVoice **实时 WebSocket** 端点（北京地域） |
 | `speech.tts.model` | `cosyvoice-v3-flash` | TTS 模型 |
@@ -224,6 +238,7 @@ while (true) {
 | `perception` | 感知上下文 |
 | `voice_id` | TTS 音色 ID（见 `/api/schema`）；省略则用服务端默认音色 |
 | `skip_tts` | 可选。**推荐 `true`**：`/api/chat` 不等待 TTS，`output.audio` 为 `null`，客户端立即调 **`POST /api/tts/stream`**；`false` 强制内嵌 TTS；省略则遵循 `chat.inline_tts`（默认 `true`，首声较慢） |
+| `server_tts` | 可选，仅 **`POST /api/chat/stream`** 有效。为 `true` 时在 NDJSON 中推送 `tts_meta` / `tts_chunk`（服务端合成，客户端直接播放）；为 `false` 仅推送文本；省略则遵循 `chat.stream_server_tts`（默认 `true`，且需 `speech.enabled=true`） |
 
 **输入合法性**（至少满足其一）：
 
@@ -593,6 +608,44 @@ Content-Type: application/json
 |------|------|
 | 400 | 无有效输入（无文字、无音频、无非声音感知）；语音未启用却传了 `audio` |
 
+#### 3.4.1 流式聊天 `POST /api/chat/stream`
+
+NDJSON 行流式对话：LLM 流式生成 + **回复通知 + 可选服务端 TTS 音频**。请求体与 `POST /api/chat` 相同（`ChatRequest`），响应 `Content-Type: application/x-ndjson`。
+
+**典型请求（VoiceDemo / 实时语音）：**
+
+```json
+{
+  "robot_id": "default",
+  "user_id": "demo",
+  "session_id": "sess-a1b2c3d4",
+  "input": {
+    "text": "",
+    "audio": {
+      "format": "wav",
+      "encoding": "base64",
+      "sample_rate": 16000,
+      "data": "UklGRi..."
+    },
+    "skip_tts": true,
+    "server_tts": true
+  }
+}
+```
+
+**响应行类型：**
+
+| `type` | 说明 |
+|--------|------|
+| `reply` | `phase`: `start` / `speak` / `speak_done` / `tts_error` / `done` |
+| `speak` | 朗读文本片段，含 `seq` |
+| `tts_meta` | 该 `seq` 音频格式（`format`, `sample_rate`） |
+| `tts_chunk` | Base64 音频分片，字段 `data` |
+| `done` | 收尾，含完整 `response`（同 `/api/chat` 200 体） |
+| `error` | 失败，`message` 说明原因 |
+
+完整事件协议与播放规则见 **[回复通知与服务端 TTS 架构](./回复通知与服务端TTS架构.md)**。
+
 ---
 
 ### 3.5 语音识别
@@ -811,6 +864,22 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
 ```
 
 **轮询建议：** 每 3–10 秒请求一次，将上次 `last_id` 作为下次 `since_id`。`items[].content` 非空时，对每条消息调用 **`POST /api/tts/stream`** 播放（官方 Android 客户端已按此实现）。
+
+#### 3.8.1 回复通知 WebSocket `WS /api/reply/notify`
+
+服务端主动推送「需要回复用户」的通知与 TTS 音频（主动陪伴、提醒等），**不经过** `chat/stream` HTTP。事件格式与 §3.4.1 NDJSON 行相同（`reply` / `speak` / `tts_meta` / `tts_chunk`）。
+
+**连接：**
+
+```
+ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可选>
+```
+
+连接成功后首条消息：`{"type":"ready"}`。
+
+**匹配规则：** 按 `robot_id` + `user_id` 投递；`session_id` 可选，双方为空或相等时匹配。
+
+**客户端：** Android `:voice-server` 的 `ReplyNotifyClient` 在 `connectRealtime` / `testConnection` 时自动订阅，与 `chat/stream` 共用 `ReplyAudioPlayer` 播放队列。详见 [回复通知与服务端 TTS 架构](./回复通知与服务端TTS架构.md)。
 
 ---
 
@@ -1208,6 +1277,16 @@ TTS 基于阿里云百炼 **CosyVoice 实时 WebSocket**（`cosyvoice-v3-flash`�
 - 流式请求体与 `TtsRequest` 相同：`text`、`voice`（取自 `output.voice`）、`voice_id`
 - 语音 STT 失败时 `output.text` 为空，应提示「未能识别语音」
 - 主动消息：`GET /api/proactive_messages?since_id=<last>`，播放走 `/api/tts/stream`
+
+**VoiceDemo / `:voice-server`（实时语音 + 非阻断回复）：**
+
+1. `WS /api/stt/stream` 实时 STT（近场门控）
+2. 段结束 `POST /api/chat/stream`，`skip_tts: true`，`server_tts: true`
+3. 解析 NDJSON：`reply` / `speak` 更新 UI，`tts_chunk` 交 `ReplyAudioPlayer` 播放
+4. `WS /api/reply/notify` 长连接接收主动发言/提醒（同协议）
+5. 采集与播放并行，互不阻塞
+
+详见 [回复通知与服务端 TTS 架构](./回复通知与服务端TTS架构.md)。
 
 ### 4.2 Web
 

@@ -8,11 +8,18 @@ import com.pophie.voice.VoiceListener;
 import com.pophie.voice.VoiceSegment;
 import com.pophie.voice.WavUtil;
 
+import java.io.IOException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
+
 /**
  * 桥接 {@link com.pophie.voice.VoiceEngine} 与 Pophie 服务端：
  * <ul>
  *   <li>实时 STT（WebSocket，近场门控，与声纹无关）</li>
  *   <li>段结束 chat/stream（可选，可配合 OWNER_ONLY 门控）</li>
+ *   <li>回复通知 + 服务端 TTS 音频播放（独立线程，不阻断采集）</li>
+ *   <li>主动发言/提醒订阅 {@code /api/reply/notify}</li>
  * </ul>
  */
 public final class VoiceServerBridge {
@@ -37,11 +44,37 @@ public final class VoiceServerBridge {
     private volatile boolean vadSpeaking;
     private int sttStrongFrames;
 
+    private final ReplyAudioPlayer replyPlayer = new ReplyAudioPlayer();
+    private final ReplyNotifyClient replyNotify = new ReplyNotifyClient();
+    /** 串行 chat/stream，避免多段并行时 reply 事件交错。 */
+    private final ExecutorService chatExecutor = Executors.newSingleThreadExecutor();
+    /** 串行测试推送，避免连点重叠。 */
+    private final ExecutorService notifyTestExecutor = Executors.newSingleThreadExecutor();
+    private final AtomicInteger pendingTestPushes = new AtomicInteger(0);
+    private static final int MAX_PENDING_TEST_PUSHES = 3;
+
     public VoiceServerBridge(VoiceServerConfig config) {
         this.config = config;
         this.api = new PophieApiClient(config);
         this.realtimeStt = new RealtimeSttClient();
         this.logEnabled = config.logEnabled;
+        replyPlayer.setListener(new ReplyAudioPlayer.Listener() {
+            @Override
+            public void onPlayStart(int seq, String text) {
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onReplyPlayStart(seq);
+                });
+            }
+
+            @Override
+            public void onPlayEnd(int seq) {
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onReplyPlayEnd(seq);
+                });
+            }
+        });
     }
 
     public void setListener(VoiceServerListener listener) {
@@ -80,10 +113,11 @@ public final class VoiceServerBridge {
         gateMode = mode == null ? GateMode.REPORT : mode;
     }
 
-    /** 建立实时 STT WebSocket。 */
+    /** 建立实时 STT WebSocket；若开启则同时订阅回复通知。 */
     public void connectRealtime() {
         if (!realtimeEnabled) return;
         postSttConnecting();
+        connectReplyNotify();
         realtimeStt.connect(api.getBaseUrl(), new RealtimeSttClient.Listener() {
             @Override
             public void onConnected() {
@@ -144,6 +178,8 @@ public final class VoiceServerBridge {
 
     public void disconnect() {
         realtimeStt.close();
+        replyNotify.close();
+        replyPlayer.reset();
         utteranceOpen = false;
         sttStrongFrames = 0;
         pendingSttPartial = "";
@@ -164,6 +200,7 @@ public final class VoiceServerBridge {
                         l.onConnectionTested(health.speechEnabled, session.sessionId, null);
                     }
                 });
+                connectReplyNotify();
             } catch (Exception e) {
                 main.post(() -> {
                     VoiceServerListener l = listener;
@@ -308,9 +345,116 @@ public final class VoiceServerBridge {
         pendingSttPartial = "";
     }
 
+    /** 订阅 /api/reply/notify（已连接则复用，避免连点断开）。 */
+    public void connectReplyNotify() {
+        if (!config.replyNotifyEnabled) return;
+        ensureReplyNotifyConnected(5_000);
+    }
+
+    private boolean ensureReplyNotifyConnected(long readyTimeoutMs) {
+        return replyNotify.connectIfNeeded(
+                api.getBaseUrl(), config.robotId, config.userId, sessionId,
+                createReplyNotifyHandler(), readyTimeoutMs);
+    }
+
+    private ReplyNotifyClient.EventHandler createReplyNotifyHandler() {
+        return new ReplyNotifyClient.EventHandler() {
+            @Override
+            public void onReady() { }
+
+            @Override
+            public void onReplyEvent(String phase, String text, int seq, String source) {
+                routeReplyEvent(phase, seq);
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onReplyNotify(phase, text, source);
+                });
+            }
+
+            @Override
+            public void onTtsMeta(int seq, String format, int sampleRate) {
+                replyPlayer.onTtsMeta(seq, format, sampleRate);
+            }
+
+            @Override
+            public void onTtsChunk(int seq, byte[] audio) {
+                replyPlayer.onTtsChunk(seq, audio);
+            }
+
+            @Override
+            public void onError(String message) {
+                replyPlayer.recover();
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onReplyNotify("error", message, "notify");
+                });
+            }
+
+            @Override
+            public void onClosed() {
+                replyPlayer.recover();
+            }
+        };
+    }
+
+    private PophieApiClient.ChatStreamHandler createChatStreamHandler(
+            StringBuilder streamReply) {
+        return new PophieApiClient.ChatStreamHandler() {
+            @Override
+            public void onReply(String phase, String text, int seq, String source) {
+                routeReplyEvent(phase, seq);
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onReplyNotify(phase, text, source);
+                });
+            }
+
+            @Override
+            public void onSpeak(String text, int seq) {
+                streamReply.append(text);
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onChatSpeakChunk(text);
+                });
+            }
+
+            @Override
+            public void onTtsMeta(int seq, String format, int sampleRate) {
+                replyPlayer.onTtsMeta(seq, format, sampleRate);
+            }
+
+            @Override
+            public void onTtsChunk(int seq, byte[] audio) {
+                replyPlayer.onTtsChunk(seq, audio);
+            }
+        };
+    }
+
+    private void routeReplyEvent(String phase, int seq) {
+        if ("start".equals(phase)) {
+            replyPlayer.onReplyStart();
+        } else if ("done".equals(phase)) {
+            replyPlayer.onReplyDone();
+        } else if (("speak_done".equals(phase) || "tts_error".equals(phase)) && seq > 0) {
+            replyPlayer.onSpeakDone(seq);
+        }
+    }
+
     private void requestChatStream(VoiceSegment seg) {
-        if (!chatEnabled) return;
-        if (seg.durationMs < config.minChatSegmentMs) return;
+        if (!chatEnabled) {
+            main.post(() -> {
+                VoiceServerListener l = listener;
+                if (l != null) l.onChatSkipped("chat 未开启（请打开开关）");
+            });
+            return;
+        }
+        if (seg.durationMs < config.minChatSegmentMs) {
+            main.post(() -> {
+                VoiceServerListener l = listener;
+                if (l != null) l.onChatSkipped("段太短 <" + config.minChatSegmentMs + "ms");
+            });
+            return;
+        }
         if (gateMode == GateMode.OWNER_ONLY && (seg.speaker == null || !seg.speaker.isOwner)) {
             main.post(() -> {
                 VoiceServerListener l = listener;
@@ -320,18 +464,15 @@ public final class VoiceServerBridge {
         }
         byte[] wav = seg.toWav();
         final StringBuilder streamReply = new StringBuilder();
-        new Thread(() -> {
+        chatExecutor.execute(() -> {
             try {
                 if (sessionId.isEmpty()) {
                     PophieApiClient.SessionInfo session = api.newSession();
                     sessionId = session.sessionId;
                 }
                 PophieApiClient.ChatStreamResult result = api.chatStream(
-                        sessionId, wav, seg.sampleRate, chunk -> main.post(() -> {
-                            streamReply.append(chunk);
-                            VoiceServerListener l = listener;
-                            if (l != null) l.onChatSpeakChunk(chunk);
-                        }));
+                        sessionId, wav, seg.sampleRate,
+                        createChatStreamHandler(streamReply), config);
                 sessionId = result.sessionId;
                 String replyLine = result.replyText.isEmpty() ? "" : result.replyText;
                 main.post(() -> {
@@ -344,7 +485,45 @@ public final class VoiceServerBridge {
                     if (l != null) l.onChatError(e.getMessage());
                 });
             }
-        }).start();
+        });
+    }
+
+    private int testPushCounter;
+
+    /** 联调：请求服务端推送测试回复（需 notify WebSocket 已 ready）。 */
+    public void testReplyPush() {
+        if (pendingTestPushes.incrementAndGet() > MAX_PENDING_TEST_PUSHES) {
+            pendingTestPushes.decrementAndGet();
+            main.post(() -> {
+                VoiceServerListener l = listener;
+                if (l != null) {
+                    l.onReplyNotify("error", "推送排队已满（最多 " + MAX_PENDING_TEST_PUSHES
+                            + " 条），请稍候", "test");
+                }
+            });
+            return;
+        }
+        notifyTestExecutor.execute(() -> {
+            try {
+                if (!ensureReplyNotifyConnected(8_000)) {
+                    throw new IOException("reply/notify 未连接，请先点「测连接」或稍候再试");
+                }
+                int n = ++testPushCounter;
+                api.testReplyPush("测试语音 " + n);
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onReplyNotify("test_sent", "已请求测试推送 #" + n, "test");
+                });
+            } catch (Exception e) {
+                replyPlayer.recover();
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onReplyNotify("error", e.getMessage(), "test");
+                });
+            } finally {
+                pendingTestPushes.decrementAndGet();
+            }
+        });
     }
 
     private void postSttConnecting() {

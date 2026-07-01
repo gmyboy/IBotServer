@@ -78,7 +78,7 @@ public class MainActivity extends AppCompatActivity {
         replyResult = findViewById(R.id.replyResult);
 
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        String savedUrl = prefs.getString(KEY_SERVER_URL, "http://192.168.23.156:9900/");
+        String savedUrl = prefs.getString(KEY_SERVER_URL, "http://192.168.23.156:9901/");
         String sessionId = prefs.getString(KEY_SESSION_ID, "");
 
         serverUrl.setText(savedUrl);
@@ -95,6 +95,7 @@ public class MainActivity extends AppCompatActivity {
         btnVerify.setOnClickListener(v -> verifyOwner());
         btnCohort.setOnClickListener(v -> addCohort());
         btnTestServer.setOnClickListener(v -> testServerConnection());
+        findViewById(R.id.btnTestReply).setOnClickListener(v -> testReplyPush());
 
         serverUrl.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) persistServerUrl();
@@ -130,6 +131,7 @@ public class MainActivity extends AppCompatActivity {
                     }
                     bytes = 0;
                     syncServerFlags();
+                    serverBridge.connectReplyNotify();
                     if (switchRealtimeStt.isChecked()) {
                         serverBridge.connectRealtime();
                     }
@@ -205,10 +207,36 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onChatComplete(String replyText) {
-                chatReplyBuf.setLength(0);
-                String line = replyText.isEmpty() ? "（静默）" : replyText;
+            public void onReplyNotify(String phase, String text, String source) {
+                if ("start".equals(phase)) {
+                    chatReplyBuf.setLength(0);
+                    replyResult.setText("回复：生成中…");
+                } else if ("speak".equals(phase) && text != null && !text.isEmpty()) {
+                    chatReplyBuf.append(text);
+                    replyResult.setText("回复：" + chatReplyBuf + " 🔊");
+                } else if ("done".equals(phase)) {
+                    appendSttLog("notify[" + source + "]→" + chatReplyBuf);
+                }
+            }
+
+            @Override
+            public void onReplyPlayStart(int seq) {
+                replyResult.setText("回复：" + chatReplyBuf + " ▶播放中");
+            }
+
+            @Override
+            public void onReplyPlayEnd(int seq) {
+                String line = chatReplyBuf.length() == 0 ? "（静默）" : chatReplyBuf.toString();
                 replyResult.setText("回复：" + line);
+            }
+
+            @Override
+            public void onChatComplete(String replyText) {
+                if (chatReplyBuf.length() == 0 && replyText != null && !replyText.isEmpty()) {
+                    chatReplyBuf.append(replyText);
+                }
+                String line = chatReplyBuf.length() == 0 ? "（静默）" : chatReplyBuf.toString();
+                replyResult.setText("回复：" + line + " …");
                 appendSttLog("chat→" + line);
                 persistSessionId(serverBridge.getSessionId());
             }
@@ -274,7 +302,14 @@ public class MainActivity extends AppCompatActivity {
     private void testServerConnection() {
         persistServerUrl();
         serverStatus.setText("服务：检测中…");
+        serverBridge.connectReplyNotify();
         serverBridge.testConnection();
+    }
+
+    private void testReplyPush() {
+        persistServerUrl();
+        replyResult.setText("回复：等待测试推送…");
+        serverBridge.testReplyPush();
     }
 
     private void appendSttLog(String line) {

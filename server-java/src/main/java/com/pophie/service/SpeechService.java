@@ -31,6 +31,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -46,6 +48,9 @@ import java.util.regex.Pattern;
 public class SpeechService {
 
     private static final Logger log = LoggerFactory.getLogger("pophie.speech");
+
+    /** CosyVoice WebSocket 不宜并发，与 Python _tts_lock 对齐。 */
+    private final Object ttsLock = new Object();
 
     public static final String DASHSCOPE_TTS_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
     /** Qwen3-ASR-Realtime WebSocket（与 TTS 的 /inference 端点不同） */
@@ -394,8 +399,11 @@ public class SpeechService {
         RuntimeException lastErr = null;
         for (int attempt = 0; attempt < maxRetries; attempt++) {
             try {
-                long first = doTtsCall(apiKey, model, timbre, audioFormat, rp[0], rp[1],
-                        instruction, text, onChunk);
+                long first;
+                synchronized (ttsLock) {
+                    first = doTtsCall(apiKey, model, timbre, audioFormat, rp[0], rp[1],
+                            instruction, text, onChunk, waits);
+                }
                 if (metrics != null) metrics.put("first_packet_ms", first);
                 log.info("[speech] TTS ws ok voice_id={} len={} model={} fmt={}",
                         vid, text.length(), model, outputFormat);
@@ -414,7 +422,7 @@ public class SpeechService {
     private long doTtsCall(String apiKey, String model, String timbre,
                            com.alibaba.dashscope.audio.ttsv2.SpeechSynthesisAudioFormat audioFormat,
                            double rate, double pitch, String instruction, String text,
-                           Consumer<byte[]> onChunk) {
+                           Consumer<byte[]> onChunk, double[] waits) {
         com.alibaba.dashscope.audio.ttsv2.SpeechSynthesisParam param =
                 com.alibaba.dashscope.audio.ttsv2.SpeechSynthesisParam.builder()
                         .apiKey(apiKey)
@@ -426,6 +434,9 @@ public class SpeechService {
                         .build();
 
         AtomicReference<Throwable> err = new AtomicReference<>();
+        AtomicInteger chunkEvents = new AtomicInteger(0);
+        AtomicLong totalBytes = new AtomicLong(0);
+        CountDownLatch done = new CountDownLatch(1);
         com.alibaba.dashscope.audio.ttsv2.SpeechSynthesizer synthesizer =
                 new com.alibaba.dashscope.audio.ttsv2.SpeechSynthesizer(param,
                         new com.alibaba.dashscope.common.ResultCallback<com.alibaba.dashscope.audio.tts.SpeechSynthesisResult>() {
@@ -436,26 +447,61 @@ public class SpeechService {
                                     byte[] bytes = new byte[f.remaining()];
                                     f.get(bytes);
                                     onChunk.accept(bytes);
+                                    chunkEvents.incrementAndGet();
+                                    totalBytes.addAndGet(bytes.length);
                                 }
                             }
 
                             @Override
-                            public void onComplete() {}
+                            public void onComplete() {
+                                done.countDown();
+                            }
 
                             @Override
                             public void onError(Exception e) {
                                 err.set(e);
+                                done.countDown();
                             }
                         });
-        synthesizer.call(text);
-        if (err.get() != null) {
-            throw new RuntimeException(err.get().getMessage(), err.get());
-        }
+        long t0 = System.currentTimeMillis();
         try {
+            ByteBuffer returned = synthesizer.call(text);
+            long maxWaitMs = (long) (waits[1] * 1000) + 10_000;
+            if (!done.await(maxWaitMs, TimeUnit.MILLISECONDS)) {
+                throw new RuntimeException("TTS 合成超时");
+            }
+            if (err.get() != null) {
+                throw new RuntimeException(err.get().getMessage(), err.get());
+            }
+            if (totalBytes.get() == 0) {
+                emitAudioBuffer(onChunk, returned, totalBytes);
+            }
+            if (totalBytes.get() == 0) {
+                emitAudioBuffer(onChunk, synthesizer.getAudioData(), totalBytes);
+            }
+            if (totalBytes.get() == 0) {
+                throw new RuntimeException("TTS 未返回音频数据");
+            }
+            log.info("[speech] TTS chunks={} bytes={} in {}ms",
+                    chunkEvents.get(), totalBytes.get(), System.currentTimeMillis() - t0);
+            try {
+                synthesizer.getDuplexApi().close(1000, "bye");
+            } catch (Exception ignored) {
+            }
             return synthesizer.getFirstPackageDelay();
-        } catch (Exception e) {
-            return -1;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("TTS 合成被中断", e);
         }
+    }
+
+    private static void emitAudioBuffer(Consumer<byte[]> onChunk, ByteBuffer buf,
+                                        AtomicLong totalBytes) {
+        if (buf == null || buf.remaining() <= 0) return;
+        byte[] bytes = new byte[buf.remaining()];
+        buf.get(bytes);
+        onChunk.accept(bytes);
+        totalBytes.addAndGet(bytes.length);
     }
 
     private com.alibaba.dashscope.audio.ttsv2.SpeechSynthesisAudioFormat resolveAudioFormat(String fmtIn, int sampleRate) {

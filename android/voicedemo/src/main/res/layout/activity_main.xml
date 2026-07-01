@@ -150,7 +150,14 @@
                 android:id="@+id/switchChat"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="段结束 chat/stream（仅主人段）" />
+                android:checked="true"
+                android:text="段结束 chat/stream（对话回复）" />
+
+            <Button
+                android:id="@+id/btnTestReply"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="测试回复推送（reply/notify）" />
 
             <Button
                 android:id="@+id/btnTestServer"

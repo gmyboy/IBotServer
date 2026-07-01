@@ -71,14 +71,17 @@ public class ReminderService {
     private final ReminderRepository reminderRepo;
     private final ConversationRepository conversationRepo;
     private final ProactiveLogRepository proactiveLogRepo;
+    private final ReplyNotifyService replyNotify;
 
     public ReminderService(LlmService llm, MemoryService memory, ReminderRepository reminderRepo,
-                           ConversationRepository conversationRepo, ProactiveLogRepository proactiveLogRepo) {
+                           ConversationRepository conversationRepo, ProactiveLogRepository proactiveLogRepo,
+                           ReplyNotifyService replyNotify) {
         this.llm = llm;
         this.memory = memory;
         this.reminderRepo = reminderRepo;
         this.conversationRepo = conversationRepo;
         this.proactiveLogRepo = proactiveLogRepo;
+        this.replyNotify = replyNotify;
     }
 
     // ---------- 抽取 ----------
@@ -257,6 +260,7 @@ public class ReminderService {
             md.put("remind_at", reminder.get("remind_at"));
             conv.setMetadata(JsonUtil.dumps(md));
             conversationRepo.save(conv);
+            replyNotify.notifyReply(robotId, "default", sessionId, msg, "reminder");
         }
         log.info("[reminder.fire] #{} @ {} → {}", id, reminder.get("remind_at"), msg);
     }

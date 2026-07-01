@@ -117,6 +117,12 @@ public class ChatService {
                 ? sessionId : "sess-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
     }
 
+    private boolean shouldServerTts(ChatInput chatInput) {
+        if (Boolean.FALSE.equals(chatInput.getServerTts())) return false;
+        if (Boolean.TRUE.equals(chatInput.getServerTts())) return speech.isEnabled();
+        return speech.isEnabled() && RuntimeConfigService.bool(cfg.chat(), "stream_server_tts", true);
+    }
+
     private boolean shouldInlineTts(ChatInput chatInput) {
         if (Boolean.TRUE.equals(chatInput.getSkipTts())) return false;
         if (Boolean.FALSE.equals(chatInput.getSkipTts())) return true;
@@ -523,23 +529,28 @@ public class ChatService {
 
         BuiltHistory bh = buildChatHistory(robotId, sessionId, userText);
         boolean deferSide = RuntimeConfigService.bool(cfg.chat(), "defer_side_tasks", true);
+        boolean serverTts = shouldServerTts(chatInput);
+        VoiceProsody voice = chatInput.getPerception() != null ? chatInput.getPerception().getVoice() : null;
+        String voiceId = chatInput.getVoiceId();
+        Object emitLock = new Object();
+        ReplyStreamEmitter replyEmitter = new ReplyStreamEmitter(
+                sessionId, serverTts, voice, voiceId, speech, bgExecutor, emitLock, line -> {
+                    synchronized (emitLock) {
+                        emit.accept(line);
+                    }
+                });
+        replyEmitter.replyStart("chat");
 
         StreamingReplyTextExtractor extractor = new StreamingReplyTextExtractor();
         try {
             String fullContent = llm.streamChat(bh.history, null, true, delta -> {
                 for (String chunk : extractor.feed(delta)) {
-                    Map<String, Object> ev = new LinkedHashMap<>();
-                    ev.put("type", "speak");
-                    ev.put("text", chunk);
-                    emit.accept(JsonUtil.dumps(ev) + "\n");
+                    replyEmitter.emitSpeak(chunk);
                 }
             });
             String tail = extractor.flush();
             if (tail != null && !tail.isEmpty()) {
-                Map<String, Object> ev = new LinkedHashMap<>();
-                ev.put("type", "speak");
-                ev.put("text", tail);
-                emit.accept(JsonUtil.dumps(ev) + "\n");
+                replyEmitter.emitSpeak(tail);
             }
 
             FacialExpression userExpr = Schemas.parseFacialExpression(asStr(prepared.pData.get("facial_expression")));
@@ -566,6 +577,8 @@ public class ChatService {
             resp.setOutput(output);
             resp.setStt(prepared.stt);
             resp.setRecalled(recalledSummary(bh.mems));
+            replyEmitter.awaitPendingTts(120_000);
+            replyEmitter.replyDone();
             Map<String, Object> done = new LinkedHashMap<>();
             done.put("type", "done");
             done.put("response", resp);

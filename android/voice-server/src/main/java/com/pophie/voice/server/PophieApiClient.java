@@ -94,8 +94,41 @@ public final class PophieApiClient {
         }
     }
 
+    /** 联调：触发服务端经 reply/notify WebSocket 推送测试回复（不按 session 过滤）。 */
+    public void testReplyPush(String text) throws IOException {
+        try {
+            JSONObject root = new JSONObject();
+            root.put("robot_id", robotId);
+            root.put("user_id", userId);
+            if (text != null && !text.isEmpty()) {
+                root.put("text", text);
+            }
+            Request req = new Request.Builder()
+                    .url(baseUrl + "api/reply/test")
+                    .post(RequestBody.create(root.toString(), JSON))
+                    .build();
+            try (Response resp = client.newCall(req).execute()) {
+                String body = resp.body() != null ? resp.body().string() : "";
+                if (!resp.isSuccessful()) {
+                    throw new IOException("HTTP " + resp.code() + ": " + body);
+                }
+            }
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+    }
+
     public ChatStreamResult chatStream(String sessionId, byte[] wavBytes, int sampleRate,
-                                       SpeakListener onSpeak) throws IOException {
+                                       ChatStreamHandler handler, VoiceServerConfig cfg) throws IOException {
+        if (cfg == null) {
+            throw new IOException("VoiceServerConfig required");
+        }
+        return chatStreamInternal(sessionId, wavBytes, sampleRate, handler, cfg);
+    }
+
+    private ChatStreamResult chatStreamInternal(String sessionId, byte[] wavBytes, int sampleRate,
+                                                ChatStreamHandler handler,
+                                                VoiceServerConfig cfg) throws IOException {
         if (wavBytes == null || wavBytes.length == 0) {
             throw new IOException("空音频");
         }
@@ -110,6 +143,7 @@ public final class PophieApiClient {
             input.put("text", "");
             input.put("audio", audio);
             input.put("skip_tts", true);
+            input.put("server_tts", cfg.serverReplyTts);
 
             JSONObject root = new JSONObject();
             root.put("robot_id", robotId);
@@ -143,11 +177,36 @@ public final class PophieApiClient {
                     JSONObject obj = new JSONObject(line);
                     String type = obj.optString("type", "");
                     switch (type) {
+                        case "reply" -> {
+                            if (handler != null) {
+                                handler.onReply(obj.optString("phase", ""),
+                                        obj.optString("text", ""),
+                                        obj.optInt("seq", 0),
+                                        obj.optString("source", "chat"));
+                            }
+                        }
                         case "speak" -> {
                             String text = obj.optString("text", "");
+                            int seq = obj.optInt("seq", 0);
                             if (!text.isEmpty()) {
                                 reply.append(text);
-                                if (onSpeak != null) onSpeak.onSpeak(text);
+                                if (handler != null) handler.onSpeak(text, seq);
+                            }
+                        }
+                        case "tts_meta" -> {
+                            if (handler != null) {
+                                handler.onTtsMeta(obj.optInt("seq", 0),
+                                        obj.optString("format", "pcm"),
+                                        obj.optInt("sample_rate", 22050));
+                            }
+                        }
+                        case "tts_chunk" -> {
+                            if (handler != null) {
+                                String data = obj.optString("data", "");
+                                if (!data.isEmpty()) {
+                                    handler.onTtsChunk(obj.optInt("seq", 0),
+                                            Base64.decode(data, Base64.DEFAULT));
+                                }
                             }
                         }
                         case "error" ->
@@ -301,6 +360,14 @@ public final class PophieApiClient {
         } catch (Exception e) {
             throw new IOException(e.getMessage(), e);
         }
+    }
+
+    /** chat/stream NDJSON 事件（后台线程回调）。 */
+    public interface ChatStreamHandler {
+        default void onReply(String phase, String text, int seq, String source) {}
+        default void onSpeak(String text, int seq) {}
+        default void onTtsMeta(int seq, String format, int sampleRate) {}
+        default void onTtsChunk(int seq, byte[] audio) {}
     }
 
     public interface SpeakListener {

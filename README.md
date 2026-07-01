@@ -176,6 +176,7 @@ AIRobot/
 
 - **网页版**：多模态感知模拟、记忆流转可视化、主动 tick
 - **Android 版**：按住说话、7 类表情选择、自动播放机器人语音
+- **VoiceDemo（`:voice-server`）**：实时 STT + 非阻断回复；服务端 TTS 随 `chat/stream` / `reply/notify` 推送，见 [`docs/回复通知与服务端TTS架构.md`](docs/回复通知与服务端TTS架构.md)
 - **情感双驱动**：记忆下沉由 importance 与 emotion_score 共同决定，见 `config.yaml`
 - **不实现遗忘**：按需求保留所有记忆
 - **端侧（XBot）对接**：端侧本地完成表情/身份/手势识别后，通过 `perception` 把 `facial_expression`（接受 `surprised/disgusted/fearful` 等别名）、`identity`、`gesture` 发给后端大模型。

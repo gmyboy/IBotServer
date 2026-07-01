@@ -43,14 +43,17 @@ public class ProactiveService {
     private final MemoryService memory;
     private final ConversationRepository conversationRepo;
     private final ProactiveLogRepository proactiveLogRepo;
+    private final ReplyNotifyService replyNotify;
 
     public ProactiveService(LlmService llm, MemoryService memory,
                             ConversationRepository conversationRepo,
-                            ProactiveLogRepository proactiveLogRepo) {
+                            ProactiveLogRepository proactiveLogRepo,
+                            ReplyNotifyService replyNotify) {
         this.llm = llm;
         this.memory = memory;
         this.conversationRepo = conversationRepo;
         this.proactiveLogRepo = proactiveLogRepo;
+        this.replyNotify = replyNotify;
     }
 
     public Map<String, Object> perceiveAndRespond(String robotId, String sessionId,
@@ -106,6 +109,7 @@ public class ProactiveService {
             md.put("used_memory_ids", usedIds);
             conv.setMetadata(JsonUtil.dumps(md));
             conversationRepo.save(conv);
+            replyNotify.notifyReply(robotId, userId, sessionId, content, "proactive");
         }
 
         Map<String, Object> out = new LinkedHashMap<>();

@@ -48,3 +48,15 @@ com.pophie.app/
 ├── ui/             # Compose 界面
 └── viewmodel/      # 聊天状态管理
 ```
+
+## Voice SDK 与 VoiceDemo
+
+除官方 App（`:app`）外，仓库还提供端侧语音 SDK 与调试 Demo：
+
+| 模块 | 说明 |
+|------|------|
+| `:voice` | 端侧采集、VAD、声纹（零网络） |
+| `:voice-server` | 桥接服务端：实时 STT、`chat/stream`、回复通知 + TTS 播放 |
+| `:voicedemo` | SDK + 服务端联调 Demo |
+
+**回复通知与服务端 TTS 架构**（非阻断采集、服务端合成、客户端播放）：见 [`docs/回复通知与服务端TTS架构.md`](../docs/回复通知与服务端TTS架构.md)。

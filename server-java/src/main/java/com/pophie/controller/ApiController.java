@@ -28,6 +28,7 @@ import com.pophie.service.ChatService;
 import com.pophie.service.MemoryService;
 import com.pophie.service.ProactiveService;
 import com.pophie.service.ReminderService;
+import com.pophie.service.ReplyNotifyService;
 import com.pophie.service.RobotService;
 import com.pophie.service.SpeechService;
 import com.pophie.service.VoiceSegmentLogService;
@@ -72,11 +73,13 @@ public class ApiController {
     private final ConversationRepository conversationRepo;
     private final ProactiveLogRepository proactiveLogRepo;
     private final VoiceSegmentLogService voiceSegmentLog;
+    private final ReplyNotifyService replyNotify;
 
     public ApiController(ChatService chatService, MemoryService memory, ReminderService reminder,
                          ProactiveService proactive, SpeechService speech, RobotService robotService,
                          MemoryRepository memoryRepo, ConversationRepository conversationRepo,
-                         ProactiveLogRepository proactiveLogRepo, VoiceSegmentLogService voiceSegmentLog) {
+                         ProactiveLogRepository proactiveLogRepo, VoiceSegmentLogService voiceSegmentLog,
+                         ReplyNotifyService replyNotify) {
         this.chatService = chatService;
         this.memory = memory;
         this.reminder = reminder;
@@ -87,6 +90,7 @@ public class ApiController {
         this.conversationRepo = conversationRepo;
         this.proactiveLogRepo = proactiveLogRepo;
         this.voiceSegmentLog = voiceSegmentLog;
+        this.replyNotify = replyNotify;
     }
 
     @GetMapping("/health")
@@ -349,6 +353,31 @@ public class ApiController {
             result.put("output", chatService.synthesizeProactiveOutput(result.get("content").toString()));
         }
         return result;
+    }
+
+    /**
+     * 开发/联调：向已连接 {@code /api/reply/notify} 的客户端推送一条测试回复（含 TTS）。
+     */
+    @PostMapping("/reply/test")
+    public Map<String, Object> replyTest(@RequestBody(required = false) Map<String, Object> body) {
+        String robotId = chatService.resolveRobot(body != null ? asStr(body.get("robot_id")) : null);
+        String userId = chatService.resolveUser(body != null ? asStr(body.get("user_id")) : null);
+        String sessionId = chatService.ensureSession(body != null ? asStr(body.get("session_id")) : null);
+        String text = body != null && body.get("text") != null && !body.get("text").toString().isBlank()
+                ? body.get("text").toString().trim()
+                : "这是一条测试回复，请确认你能听到。";
+        replyNotify.notifyReplyAndWait(robotId, userId, null, text, "test", 120_000);
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("ok", true);
+        out.put("robot_id", robotId);
+        out.put("user_id", userId);
+        out.put("session_id", sessionId);
+        out.put("text", text);
+        return out;
+    }
+
+    private static String asStr(Object o) {
+        return o == null ? null : o.toString();
     }
 
     @GetMapping("/memories")
