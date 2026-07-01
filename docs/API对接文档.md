@@ -19,11 +19,12 @@
 ```
 1. GET  /api/health          → 确认服务与语音能力（tts_engine=dashscope-realtime）
 2. GET  /api/schema          → 拉取表情枚举、TTS 音色列表
-3. POST /api/session/new     → 获取 session_id（也可自行生成）
-4. PUT  /api/robots/{robot_id}/owner → 首次激活时注册主人档案（见 §3.16）
-5. POST /api/chat            → 主对话（建议 input.skip_tts=true，先拿文字）
-6. POST /api/tts/stream      → 流式合成并边收边播（推荐，见 §3.6.1）
-7. GET  /api/proactive_messages → 轮询主动消息（可选；播放同样走 §3.6.1）
+3. POST /api/device/bind     → 端侧以 device_id 绑定用户（推荐，见 §3.17）
+4. POST /api/session/new     → 获取 session_id（可带 device_id 自动绑定）
+5. PUT  /api/robots/{robot_id}/owner → 首次激活时注册主人档案（见 §3.16）
+6. POST /api/chat            → 主对话（建议 input.skip_tts=true，先拿文字）
+7. POST /api/tts/stream      → 流式合成并边收边播（推荐，见 §3.6.1）
+8. GET  /api/proactive_messages → 轮询主动消息（可选；播放同样走 §3.6.1）
 ```
 
 **语音对话时序（官方 App / Web，二次 TTS 请求）：**
@@ -40,23 +41,37 @@
 
 ```
 客户端                         服务端
+  |-- POST /api/device/bind ----------->|  （首次或换机，获取 user_id / robot_id）
   |-- WS /api/stt/stream (实时 STT) ---->|  （并行，不阻断采集）
-  |-- POST /api/chat/stream ------------>|
-  |     skip_tts=true, server_tts=true   |
-  |<-- NDJSON: reply/speak/tts_*/done --|  （文本通知 + TTS 音频）
   |-- WS /api/reply/notify (长连接) ---->|  （主动发言/提醒，同协议）
+  |-- POST /api/chat/stream ------------>|
+  |     device_id + skip_tts + server_tts|
+  |<-- NDJSON: reply/speak/tts_*/done --|  （文本通知 + TTS 音频）
 ```
 
 > 架构说明见 [回复通知与服务端 TTS 架构](./回复通知与服务端TTS架构.md)。
 
 ### 1.2 身份与会话
 
-- **robot_id**：机器人唯一标识。每台物理设备（如 Android 手机 / XBot 端侧）应在首次启动时生成 UUID（推荐 `robot-<uuid>`）并持久化，后续所有请求携带同一 `robot_id`。不同 `robot_id` 的记忆、对话上下文完全隔离，可并发对话。
-- **user_id**（可选）：端侧身份识别（「认识我」）到的当前用户标识/人名。**仅作溯源写入与响应回显**，记忆与召回**仍按 `robot_id` 隔离，不按人分库**。省略时服务端按 `default` 处理。若同时也作为感知上下文喂给大模型，请放入 `input.perception.identity`（见 §2.4）。
-- **session_id**：会话标识，同一机器人内保留 L2 对话上下文；不传时服务端自动生成 `sess-<8位hex>`。
-- 客户端应在首次对话后**保存响应中的 `session_id`**，后续请求原样带回；App 重启后复用同一 `session_id` 可延续 L2 会话记忆。
+#### 用户与设备（推荐）
 
-多台机器人连接同一后端时，各自使用不同 `robot_id` 即可并发聊天，服务端无共享状态（SQLite WAL 模式支持并发读写）。
+| 概念 | 说明 |
+|------|------|
+| **device_id** | 端侧稳定唯一标识（如 `ANDROID_ID` 或本地持久化 UUID）。通过 **`POST /api/device/bind`** 注册/绑定。 |
+| **user_id** | 服务端用户主键（`usr-<hex>`）。**记忆召回、对话历史、提醒等按 `user_id` 隔离**；多设备绑定同一 `user_id` 可共享数据。 |
+| **robot_id** | 每台设备对应一个机器人实例 ID，用于主人档案、TTS 音色等机器人侧配置；绑定设备时由服务端签发或沿用请求中的值。 |
+
+绑定后，请求可携带 **`device_id`**（`ChatRequest.device_id` 或 Query），服务端以绑定关系为准解析 `user_id` / `robot_id`，无需客户端自行维护。
+
+#### 兼容模式（未绑定设备）
+
+- **robot_id**：可继续由客户端自生成并上报；省略时使用 `default`。
+- **user_id**：感知身份/昵称；省略时为 `default`。**未绑定时**记忆与对话仍可能落在 `default` 用户下，多设备易混数据，**生产环境请走设备绑定**。
+- **session_id**：会话标识，同一用户内保留 L2 对话上下文；不传时服务端自动生成 `sess-<8位hex>`。客户端应在首次对话后**保存响应中的 `session_id`** 并在后续请求带回。
+
+主人档案（§3.16）仍按 **`robot_id`** 存储（一台机器人一份档案）。`nickname` 可作为对话中的称呼，与 `user_id` 无强制等同关系。
+
+多台设备连接同一后端时：推荐每台设备独立 `device_id`；需共享记忆/对话时，第二台设备绑定时传入第一台返回的 `user_id`。
 
 ### 1.3 服务端配置（`config.yaml`）
 
@@ -311,7 +326,7 @@ CosyVoice v3 音色（通过 `GET /api/schema` 的 `tts_voices` 动态获取；`
 
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
-| `nickname` | string | 是 | 主人昵称/称呼，机器人对主人的个性化称呼（同时作为 `/api/chat` 的 `user_id` 与 `perception.identity`） |
+| `nickname` | string | 是 | 主人昵称/称呼，机器人对主人的个性化称呼（可作为 `input.perception.identity` 喂给大模型） |
 | `robot_name` | string | 是 | 主人给机器人起的名字，替换服务端默认名 |
 | `gender` | string | 否 | `male` / `female` / `other`；不填写时省略或为 `null` |
 | `birthday` | string | 否 | ISO 日期 `YYYY-MM-DD`；用户选择不填写时省略或为 `null` |
@@ -414,10 +429,24 @@ CosyVoice v3 音色（通过 `GET /api/schema` 的 `tts_voices` 动态获取；`
 
 | 参数 | 说明 |
 |------|------|
-| `robot_id` | 机器人 ID；默认 `default` |
-| `user_id` | 用户/身份标识；默认 `default` |
+| `device_id` | **推荐**。若提供则自动执行设备绑定（同 §3.17），响应含绑定后的 `user_id` / `robot_id` |
+| `robot_id` | 未绑定时使用；默认 `default` |
+| `user_id` | 绑定时可指定已有用户（多设备同账号）；未绑定时默认 `default` |
 
-**响应 200：**
+**响应 200（带 `device_id` 绑定时额外字段）：**
+
+```json
+{
+  "device_id": "android-abc123",
+  "robot_id": "robot-feabcf8cd63a",
+  "user_id": "usr-fe8ed07dfb85",
+  "session_id": "sess-a1b2c3d4",
+  "new_user": true,
+  "new_device": true
+}
+```
+
+**响应 200（未带 `device_id`）：**
 
 ```json
 {
@@ -442,7 +471,8 @@ CosyVoice v3 音色（通过 `GET /api/schema` 的 `tts_voices` 动态获取；`
 ```json
 {
   "robot_id": "robot-xxx",
-  "user_id": "小明",
+  "user_id": "usr-fe8ed07dfb85",
+  "device_id": "android-abc123",
   "session_id": "sess-a1b2c3d4",
   "input": {
     "text": "今天好累",
@@ -458,7 +488,8 @@ CosyVoice v3 音色（通过 `GET /api/schema` 的 `tts_voices` 动态获取；`
 }
 ```
 
-> `user_id` 与 `input.perception.identity` 可同时存在：前者用于响应回显/溯源，后者会进入大模型上下文。两者均可省略。
+> `device_id`：已绑定设备**推荐携带**；服务端以绑定表为准覆盖 `user_id` / `robot_id`。  
+> `user_id` 与 `input.perception.identity` 可同时存在：前者用于数据隔离与溯源，后者进入大模型上下文。
 
 #### 典型场景
 
@@ -616,8 +647,7 @@ NDJSON 行流式对话：LLM 流式生成 + **回复通知 + 可选服务端 TTS
 
 ```json
 {
-  "robot_id": "default",
-  "user_id": "demo",
+  "device_id": "android-abc123",
   "session_id": "sess-a1b2c3d4",
   "input": {
     "text": "",
@@ -638,7 +668,7 @@ NDJSON 行流式对话：LLM 流式生成 + **回复通知 + 可选服务端 TTS
 | `type` | 说明 |
 |--------|------|
 | `reply` | `phase`: `start` / `speak` / `speak_done` / `tts_error` / `done` |
-| `speak` | 朗读文本片段，含 `seq` |
+| `speak` | 朗读文本片段，含 `seq`（**UI 展示请仅用 `reply.phase=speak`，勿与 `speak` 重复追加**） |
 | `tts_meta` | 该 `seq` 音频格式（`format`, `sample_rate`） |
 | `tts_chunk` | Base64 音频分片，字段 `data` |
 | `done` | 收尾，含完整 `response`（同 `/api/chat` 200 体） |
@@ -879,7 +909,38 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 
 **匹配规则：** 按 `robot_id` + `user_id` 投递；`session_id` 可选，双方为空或相等时匹配。
 
-**客户端：** Android `:voice-server` 的 `ReplyNotifyClient` 在 `connectRealtime` / `testConnection` 时自动订阅，与 `chat/stream` 共用 `ReplyAudioPlayer` 播放队列。详见 [回复通知与服务端 TTS 架构](./回复通知与服务端TTS架构.md)。
+**客户端：** Android `:voice-server` 的 `ReplyNotifyClient` 在设备绑定、`connectRealtime` 或 `testConnection` 后自动订阅，与 `chat/stream` 共用 `ReplyAudioPlayer` 播放队列。详见 [回复通知与服务端 TTS 架构](./回复通知与服务端TTS架构.md)。
+
+**回复文本落库：** `reply/notify` 推送的回复文本会写入 `pb_chat_conversations`（`role=assistant`，`metadata.reply_source` 为 `test` / `reminder` / `proactive` 等）。**TTS 音频不落库**。`chat/stream` 的助手回复同样在对话表中有记录。
+
+#### 3.8.2 联调：测试回复推送 `POST /api/reply/test`
+
+无需说话，经 `reply/notify` WebSocket 推送一轮测试 TTS。
+
+**请求体：**
+
+```json
+{
+  "robot_id": "robot-xxx",
+  "user_id": "usr-xxx",
+  "text": "测试语音"
+}
+```
+
+`session_id` 不传则广播该 `user_id` 下所有 notify 连接。服务端会**等待推送完成**再返回 HTTP 200。
+
+**响应 200：**
+
+```json
+{
+  "ok": true,
+  "robot_id": "robot-xxx",
+  "user_id": "usr-xxx",
+  "text": "测试语音"
+}
+```
+
+VoiceDemo 提供「测试回复推送」按钮；需先绑定设备并保持 notify WebSocket 已连接。
 
 ---
 
@@ -889,7 +950,9 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 
 | Query | 说明 |
 |-------|------|
-| `robot_id` | 默认 `default` |
+| `user_id` | 按用户查询（推荐） |
+| `device_id` | 可选；解析为绑定用户的 `user_id` |
+| `robot_id` | 兼容保留；列表按 `user_id` 过滤 |
 | `layer` | 可选：`L2` / `L3` / `L4`（L1 仅通过 `/api/l1_frames` 获取） |
 | `session_id` | 可选 |
 
@@ -897,6 +960,7 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 
 ```json
 {
+  "user_id": "usr-fe8ed07dfb85",
   "items": [
     {
       "id": 12,
@@ -940,11 +1004,25 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 
 | Query | 说明 |
 |-------|------|
-| `robot_id` | 默认 `default` |
+| `user_id` | 按用户查询（推荐） |
+| `device_id` | 可选；解析为绑定用户的 `user_id` |
+| `robot_id` | 兼容保留 |
 | `session_id` | 可选 |
 | `limit` | 默认 `100` |
 
-**响应：** `{ "items": [ ... ] }`（按时间正序）
+**响应：** `{ "items": [ ... ] }`（按时间正序）。含 `chat/stream` 助手回复及 `reply/notify` 推送的文本记录。
+
+---
+
+### 3.10.1 语音段流水
+
+**`POST /api/voice/segments`** — 客户端上传用户说话段（声纹、STT、可选 WAV），`user_id` 随请求写入。
+
+**`GET /api/voice/segments`** — 查询流水，支持 `user_id` / `device_id` / `robot_id` / `session_id` / `is_owner` 过滤。
+
+**`PATCH /api/voice/segments/{id}/stt`** — 补写 STT（实时 final 晚于入库时）。
+
+> 服务端 TTS 回复**不**写入语音段表，仅文本进对话表（见 §3.8.1）。
 
 ---
 
@@ -967,7 +1045,9 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 
 | Query | 说明 |
 |-------|------|
-| `robot_id` | 默认 `default` |
+| `user_id` | 按用户查询（推荐） |
+| `device_id` | 可选；解析为绑定用户的 `user_id` |
+| `robot_id` | 兼容保留 |
 | `status` | 可选：`pending` / `fired` / `cancelled` |
 
 ---
@@ -1168,6 +1248,58 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 
 ---
 
+### 3.17 用户与设备绑定
+
+端侧以稳定 **`device_id`** 注册/关联用户；业务数据（记忆、对话、提醒、语音段流水等）按 **`user_id`** 隔离。
+
+**数据表：** `pb_core_users`、`pb_core_devices`（见 `server-java/src/main/resources/db/schema.sql`）。已有库可执行 `migrate_user_device.sql`。
+
+#### `POST /api/device/bind`
+
+**请求体：**
+
+```json
+{
+  "device_id": "android-abc123",
+  "user_id": "usr-existing",
+  "robot_id": "robot-optional",
+  "device_name": "客厅平板",
+  "display_name": "小明"
+}
+```
+
+| 字段 | 必填 | 说明 |
+|------|------|------|
+| `device_id` | 是 | 端侧唯一标识 |
+| `user_id` | 否 | 绑定到已有用户（多设备共享数据）；省略则新建 `usr-<hex>` |
+| `robot_id` | 否 | 新设备省略时由服务端签发 `robot-<hex>` |
+| `device_name` | 否 | 设备备注 |
+| `display_name` | 否 | 用户显示名（新建用户时） |
+
+**响应 200：**
+
+```json
+{
+  "device_id": "android-abc123",
+  "user_id": "usr-fe8ed07dfb85",
+  "robot_id": "robot-feabcf8cd63a",
+  "new_user": true,
+  "new_device": true
+}
+```
+
+已绑定设备再次调用：更新 `last_seen_at`，返回既有 `user_id` / `robot_id`，`new_user` / `new_device` 为 `false`。
+
+#### `GET /api/device/bind?device_id=<id>`
+
+查询绑定关系；未绑定返回 `404`。
+
+#### 请求中携带 `device_id`
+
+`ChatRequest.device_id`、Query `device_id`（如 `/api/session/new`）等：服务端查 `pb_core_devices`，**以绑定结果覆盖**请求里的 `user_id` / `robot_id`。未绑定返回 `404`，提示先调用 `POST /api/device/bind`。
+
+---
+
 ### 3.16 主人档案
 
 > 这些是**普通接口**（非 `/api/admin/*`），无需 `X-Admin-Token`，因为它们属于客户端「首次激活向导」流程。所有数据按 `robot_id` 隔离，与现有记忆/会话的隔离模型一致。一条 `robot_id` 至多对应一份主人档案。`OwnerProfile` 字段定义见 §2.8。
@@ -1280,11 +1412,14 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 
 **VoiceDemo / `:voice-server`（实时语音 + 非阻断回复）：**
 
-1. `WS /api/stt/stream` 实时 STT（近场门控）
-2. 段结束 `POST /api/chat/stream`，`skip_tts: true`，`server_tts: true`
-3. 解析 NDJSON：`reply` / `speak` 更新 UI，`tts_chunk` 交 `ReplyAudioPlayer` 播放
-4. `WS /api/reply/notify` 长连接接收主动发言/提醒（同协议）
-5. 采集与播放并行，互不阻塞
+1. 启动时生成并持久化 **`device_id`**（`ANDROID_ID` 或本地 UUID）
+2. 点顶部 **「绑定设备」** → `POST /api/device/bind`，展示 `user_id` / `robot_id`
+3. `WS /api/stt/stream` 实时 STT（近场门控）
+4. 段结束 `POST /api/chat/stream`，携带 `device_id`，`skip_tts: true`，`server_tts: true`
+5. 解析 NDJSON：仅用 **`reply.phase=speak`** 更新 UI 文本（勿重复处理 `type=speak`）
+6. `tts_chunk` 交 `ReplyAudioPlayer` 按轮次+`seq` 播放
+7. `WS /api/reply/notify` 长连接接收主动发言/提醒（绑定后自动连接）
+8. 「测试回复推送」→ `POST /api/reply/test` 联调 notify + TTS
 
 详见 [回复通知与服务端 TTS 架构](./回复通知与服务端TTS架构.md)。
 
@@ -1304,7 +1439,7 @@ XBot 端侧在本地完成表情/身份/手势识别，把结果作为感知通�
 **上行（端侧 → 后端）**
 
 - 表情：使用 §2.1 定义的 7 类标准 key（如 `happy`、`sad`、`surprise`）。
-- 身份（认识我）：放 `input.perception.identity`（喂大模型）；如需溯源回显另放顶层 `user_id`。
+- 身份（认识我）：放 `input.perception.identity`（喂大模型）；账号体系使用 **`device_id` 绑定** 得到的 `user_id`，勿与感知身份混用。
 - 手势：放 `input.perception.gesture.type`（见 §2.4 取值），已进入大模型。
 - 持续感知 / 主动陪伴：用 `POST /api/tick`（见 §3.7）周期上报在场/身份/表情/静默。
 

@@ -29,6 +29,8 @@ bash deploy/macos-deploy.sh --redis-port 9903
 - 默认数据位置：`~/PophieData/{mysql,redis,logs,config.yaml}`
 - 停止（保留数据）：`docker compose -f docker-compose.macos.yml down`
 
+**数据库升级（已有库）：** 若部署前已有 MySQL 数据，需执行 `src/main/resources/db/migrate_user_device.sql`（新增 `pb_core_users` / `pb_core_devices` 用户设备绑定表）。全新部署由 `schema.sql` 自动建表，无需单独迁移。
+
 查看本机 IP：
 ```bash
 ipconfig getifaddr en0 || ipconfig getifaddr en1

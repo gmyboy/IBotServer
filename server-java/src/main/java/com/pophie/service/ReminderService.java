@@ -160,14 +160,15 @@ public class ReminderService {
         return null;
     }
 
-    public List<Long> scheduleReminders(String robotId, String sessionId, String sourceText,
-                                        List<Map<String, Object>> items) {
+    public List<Long> scheduleReminders(String robotId, String sessionId, String userId,
+                                        String sourceText, List<Map<String, Object>> items) {
         if (items == null || items.isEmpty()) return new ArrayList<>();
+        String uid = userId == null || userId.isBlank() ? "default" : userId.trim();
         List<Long> ids = new ArrayList<>();
         for (Map<String, Object> it : items) {
             ReminderEntity r = new ReminderEntity();
             r.setRobotId(robotId);
-            r.setUserId("default");
+            r.setUserId(uid);
             r.setSessionId(sessionId);
             r.setRemindAt(str(it.get("remind_at")));
             r.setContent(str(it.get("content")));
@@ -193,8 +194,8 @@ public class ReminderService {
 
     // ---------- 触发 ----------
 
-    private String composeFireMessage(String robotId, String sessionId, Map<String, Object> reminder) {
-        List<Map<String, Object>> mems = memory.recallForResponse(robotId, sessionId,
+    private String composeFireMessage(String userId, String sessionId, Map<String, Object> reminder) {
+        List<Map<String, Object>> mems = memory.recallForResponse(userId, sessionId,
                 str(reminder.get("content")), 4);
         String memText = memory.formatMemoriesForPrompt(mems);
         String noteOrSource = firstNonBlank(str(reminder.get("note")), str(reminder.get("source_text")), "—");
@@ -217,8 +218,9 @@ public class ReminderService {
 
     private void fireOne(Map<String, Object> reminder) {
         String robotId = str(reminder.get("robot_id"));
+        String userId = reminder.get("user_id") == null ? "default" : str(reminder.get("user_id"));
         String sessionId = reminder.get("session_id") == null ? "" : str(reminder.get("session_id"));
-        String msg = composeFireMessage(robotId, sessionId, reminder);
+        String msg = composeFireMessage(userId, sessionId, reminder);
         String now = TimeUtil.isoNow();
         Long id = toLong(reminder.get("id"));
 
@@ -234,7 +236,7 @@ public class ReminderService {
         // 写主动日志
         ProactiveLogEntity logRow = new ProactiveLogEntity();
         logRow.setRobotId(robotId);
-        logRow.setUserId("default");
+        logRow.setUserId(userId);
         Map<String, Object> trig = new LinkedHashMap<>();
         trig.put("type", "reminder");
         trig.put("reminder_id", id);
@@ -250,7 +252,7 @@ public class ReminderService {
         if (!sessionId.isEmpty()) {
             ConversationEntity conv = new ConversationEntity();
             conv.setRobotId(robotId);
-            conv.setUserId("default");
+            conv.setUserId(userId);
             conv.setSessionId(sessionId);
             conv.setRole("proactive");
             conv.setContent(msg);
@@ -260,7 +262,7 @@ public class ReminderService {
             md.put("remind_at", reminder.get("remind_at"));
             conv.setMetadata(JsonUtil.dumps(md));
             conversationRepo.save(conv);
-            replyNotify.notifyReply(robotId, "default", sessionId, msg, "reminder");
+            replyNotify.notifyReply(robotId, userId, sessionId, msg, "reminder");
         }
         log.info("[reminder.fire] #{} @ {} → {}", id, reminder.get("remind_at"), msg);
     }

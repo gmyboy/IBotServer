@@ -6,6 +6,8 @@ public final class VoiceServerConfig {
     public final String baseUrl;
     public final String robotId;
     public final String userId;
+    /** 端侧稳定设备标识，用于 POST /api/device/bind。 */
+    public final String deviceId;
     /** 近场 RMS 门限，低于此不送实时 STT。 */
     public final double nearFieldMinRms;
     /** 连续超门限帧数（约 20ms/帧）后才开始 utterance。 */
@@ -34,6 +36,7 @@ public final class VoiceServerConfig {
         this.baseUrl = b.baseUrl;
         this.robotId = b.robotId;
         this.userId = b.userId;
+        this.deviceId = b.deviceId;
         this.nearFieldMinRms = b.nearFieldMinRms;
         this.nearFieldStartFrames = b.nearFieldStartFrames;
         this.minChatSegmentMs = b.minChatSegmentMs;
@@ -51,6 +54,7 @@ public final class VoiceServerConfig {
         private String baseUrl = "http://192.168.23.156:9901/";
         private String robotId = "default";
         private String userId = "demo";
+        private String deviceId = "";
         private double nearFieldMinRms = 1000.0;
         private int nearFieldStartFrames = 3;
         private long minChatSegmentMs = 300;
@@ -66,6 +70,7 @@ public final class VoiceServerConfig {
         public Builder baseUrl(String v) { this.baseUrl = v; return this; }
         public Builder robotId(String v) { this.robotId = v; return this; }
         public Builder userId(String v) { this.userId = v; return this; }
+        public Builder deviceId(String v) { this.deviceId = v; return this; }
         public Builder nearFieldMinRms(double v) { this.nearFieldMinRms = v; return this; }
         public Builder nearFieldStartFrames(int v) { this.nearFieldStartFrames = v; return this; }
         public Builder minChatSegmentMs(long v) { this.minChatSegmentMs = v; return this; }

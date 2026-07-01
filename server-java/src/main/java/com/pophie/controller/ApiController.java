@@ -8,6 +8,8 @@ import com.pophie.repository.ConversationRepository;
 import com.pophie.repository.MemoryRepository;
 import com.pophie.repository.ProactiveLogRepository;
 import com.pophie.schema.AudioPayload;
+import com.pophie.schema.DeviceBindRequest;
+import com.pophie.schema.DeviceBindResponse;
 import com.pophie.schema.ChatRequest;
 import com.pophie.schema.FacialExpression;
 import com.pophie.schema.OwnerProfile;
@@ -24,6 +26,7 @@ import com.pophie.schema.VoiceProsody;
 import com.pophie.schema.VoiceSegmentSttPatchRequest;
 import com.pophie.schema.VoiceSegmentUploadRequest;
 import com.pophie.schema.VoiceSegmentUploadResponse;
+import com.pophie.service.DeviceBindService;
 import com.pophie.service.ChatService;
 import com.pophie.service.MemoryService;
 import com.pophie.service.ProactiveService;
@@ -74,12 +77,13 @@ public class ApiController {
     private final ProactiveLogRepository proactiveLogRepo;
     private final VoiceSegmentLogService voiceSegmentLog;
     private final ReplyNotifyService replyNotify;
+    private final DeviceBindService deviceBind;
 
     public ApiController(ChatService chatService, MemoryService memory, ReminderService reminder,
                          ProactiveService proactive, SpeechService speech, RobotService robotService,
                          MemoryRepository memoryRepo, ConversationRepository conversationRepo,
                          ProactiveLogRepository proactiveLogRepo, VoiceSegmentLogService voiceSegmentLog,
-                         ReplyNotifyService replyNotify) {
+                         ReplyNotifyService replyNotify, DeviceBindService deviceBind) {
         this.chatService = chatService;
         this.memory = memory;
         this.reminder = reminder;
@@ -91,6 +95,7 @@ public class ApiController {
         this.proactiveLogRepo = proactiveLogRepo;
         this.voiceSegmentLog = voiceSegmentLog;
         this.replyNotify = replyNotify;
+        this.deviceBind = deviceBind;
     }
 
     @GetMapping("/health")
@@ -171,9 +176,36 @@ public class ApiController {
         return out;
     }
 
+    /** 设备绑定：以端侧唯一 device_id 关联用户，返回 user_id / robot_id。 */
+    @PostMapping("/device/bind")
+    public DeviceBindResponse bindDevice(@RequestBody DeviceBindRequest req) {
+        return deviceBind.bind(req);
+    }
+
+    @GetMapping("/device/bind")
+    public DeviceBindResponse getDeviceBinding(@RequestParam String deviceId) {
+        return deviceBind.getBinding(deviceId);
+    }
+
     @PostMapping("/session/new")
     public Map<String, Object> newSession(@RequestParam(required = false) String robotId,
-                                          @RequestParam(required = false) String userId) {
+                                          @RequestParam(required = false) String userId,
+                                          @RequestParam(required = false) String deviceId) {
+        if (deviceId != null && !deviceId.isBlank()) {
+            DeviceBindRequest bindReq = new DeviceBindRequest();
+            bindReq.setDeviceId(deviceId);
+            bindReq.setUserId(userId);
+            bindReq.setRobotId(robotId);
+            DeviceBindResponse bound = deviceBind.bind(bindReq);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("device_id", bound.getDeviceId());
+            m.put("robot_id", bound.getRobotId());
+            m.put("user_id", bound.getUserId());
+            m.put("session_id", chatService.ensureSession(null));
+            m.put("new_user", bound.isNewUser());
+            m.put("new_device", bound.isNewDevice());
+            return m;
+        }
         String rid = chatService.resolveRobot(robotId);
         robotService.touchRobot(rid);
         Map<String, Object> m = new LinkedHashMap<>();
@@ -382,10 +414,14 @@ public class ApiController {
 
     @GetMapping("/memories")
     public Map<String, Object> memories(@RequestParam(required = false) String robotId,
+                                        @RequestParam(required = false) String userId,
+                                        @RequestParam(required = false) String deviceId,
                                         @RequestParam(required = false) String layer,
                                         @RequestParam(required = false) String sessionId) {
+        String uid = deviceBind.resolveUserId(deviceId, userId);
         Map<String, Object> out = new LinkedHashMap<>();
-        out.put("items", memory.listMemories(chatService.resolveRobot(robotId), layer, sessionId, 200));
+        out.put("user_id", uid);
+        out.put("items", memory.listMemories(uid, layer, sessionId, 200));
         return out;
     }
 
@@ -403,10 +439,13 @@ public class ApiController {
 
     @GetMapping("/conversations")
     public Map<String, Object> conversations(@RequestParam(required = false) String robotId,
+                                             @RequestParam(required = false) String userId,
+                                             @RequestParam(required = false) String deviceId,
                                              @RequestParam(required = false) String sessionId,
                                              @RequestParam(defaultValue = "100") int limit) {
-        String rid = chatService.resolveRobot(robotId);
-        List<ConversationEntity> rows = conversationRepo.listConversations(rid, sessionId, PageRequest.of(0, limit));
+        String uid = deviceBind.resolveUserId(deviceId, userId);
+        List<ConversationEntity> rows = conversationRepo.listConversationsByUser(
+                uid, sessionId, PageRequest.of(0, limit));
         java.util.Collections.reverse(rows);
         List<Object> items = new ArrayList<>();
         for (ConversationEntity r : rows) items.add(conversationToDict(r));

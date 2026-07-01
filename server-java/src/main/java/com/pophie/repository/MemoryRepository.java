@@ -12,11 +12,11 @@ import java.util.List;
 
 public interface MemoryRepository extends JpaRepository<MemoryEntity, Long> {
 
-    @Query("SELECT m FROM MemoryEntity m WHERE m.robotId = :robotId "
+    @Query("SELECT m FROM MemoryEntity m WHERE m.userId = :userId "
             + "AND (:layer IS NULL OR m.layer = :layer) "
             + "AND (:sessionId IS NULL OR m.sessionId = :sessionId) "
             + "ORDER BY m.id DESC")
-    List<MemoryEntity> listMemories(@Param("robotId") String robotId,
+    List<MemoryEntity> listMemories(@Param("userId") String userId,
                                     @Param("layer") String layer,
                                     @Param("sessionId") String sessionId,
                                     Pageable pageable);

@@ -16,6 +16,8 @@ public final class DbTables {
     /** 机器人与主人档案 */
     public static final String CORE_ROBOTS = "pb_core_robots";
     public static final String CORE_OWNER_PROFILES = "pb_core_owner_profiles";
+    public static final String CORE_USERS = "pb_core_users";
+    public static final String CORE_DEVICES = "pb_core_devices";
 
     /** 记忆 */
     public static final String MEM_MEMORIES = "pb_mem_memories";

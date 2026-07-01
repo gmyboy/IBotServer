@@ -1,6 +1,6 @@
 # 回复通知与服务端 TTS 架构
 
-> 版本：1.0.0 · 最后更新：2026-07-01  
+> 版本：1.1.0 · 最后更新：2026-07-01  
 > 适用：`server-java` 后端 + Android `:voice-server` / `:voicedemo`
 
 当服务端判定「需要回复用户」时（对话回复、主动发言、提醒等），采用**非阻断通知 + 服务端合成 + 客户端播放**的架构：用户可继续说话，采集不中断；客户端收到通知后展示文本，并播放服务端推送的 TTS 音频。
@@ -16,6 +16,7 @@
 | **服务端统一 TTS** | 合成在服务端完成，音色/情感与 LLM 输出一致 |
 | **客户端只播放** | 客户端不二次请求 `/api/tts/stream`，直接播放 `tts_chunk` |
 | **双通道合一** | 对话 `chat/stream` 与主动 `reply/notify` 共用同一套事件协议与播放队列 |
+| **用户数据隔离** | 设备绑定后记忆/对话/提醒按 **`user_id`** 隔离；TTS 音频流式播放**不落库**，回复文本写入对话表 |
 
 ---
 
@@ -88,7 +89,7 @@
 
 ### 3.2 朗读文本 `type: speak`
 
-与 `reply.phase=speak` 同步推送，便于 UI 逐字/逐句展示。字段：`text`, `seq`。
+与 `reply.phase=speak` 同步推送，便于调试或双通道消费。**VoiceDemo UI 只应处理 `reply.phase=speak` 展示文本**，若同时追加 `type=speak` 会导致重复显示。字段：`text`, `seq`。
 
 ### 3.3 TTS 音频
 
@@ -102,7 +103,8 @@
 1. 收到 `tts_meta(seq)` → 记录格式与采样率  
 2. 累加同 `seq` 的 `tts_chunk`  
 3. 收到 `reply.phase=speak_done`（或 `tts_error`）→ 标记该 `seq` 可播放  
-4. 按 `seq` 从 1 递增顺序播放；空音频跳过，避免队列卡住  
+4. **`chat/stream` 与 `reply/notify` 可能交错**：按**轮次（round）FIFO** 排队，轮次内按 `seq` 递增播放  
+5. `reply.phase=done` 关闭**最早**未结束轮次；空音频跳过，队头超时或异常时 `recover()` 避免卡死  
 
 ### 3.4 chat/stream 收尾
 
@@ -145,7 +147,8 @@
 | 组件 | 路径 | 职责 |
 |------|------|------|
 | `ReplyNotifyWebSocketHandler` | `websocket/ReplyNotifyWebSocketHandler.java` | 注册连接，下发 `ready` |
-| `ReplyNotifyService` | `service/ReplyNotifyService.java` | 按 `robot_id` + `user_id`（及可选 `session_id`）匹配订阅者并推送 |
+| `ReplyNotifyService` | `service/ReplyNotifyService.java` | 按 `robot_id` + `user_id`（及可选 `session_id`）匹配订阅者并推送；**将回复文本写入 `pb_chat_conversations`**（`metadata.reply_source`） |
+| `DeviceBindService` | `service/DeviceBindService.java` | `POST/GET /api/device/bind`，解析 `device_id` → `user_id` / `robot_id` |
 | `WebSocketConfig` | `configuration/WebSocketConfig.java` | 注册 `/api/reply/notify` |
 
 **连接 URL：**
@@ -154,7 +157,11 @@
 ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可选>
 ```
 
+`user_id` / `robot_id` 应来自 **`POST /api/device/bind`** 返回值；未绑定时 notify 可能无法匹配订阅。
+
 连接成功后服务端推送：`{"type":"ready"}`。
+
+**文本落库：** notify 路径推送的助手回复文本写入 `pb_chat_conversations`（`role=assistant`）。**TTS PCM/MP3 分片不入库**，仅客户端播放。
 
 **调用方：**
 
@@ -178,21 +185,23 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 
 | 类 | 职责 |
 |----|------|
-| `VoiceServerBridge` | 桥接 `VoiceEngine` 与服务端；段结束触发 `chat/stream`；管理 notify 连接 |
-| `PophieApiClient` | HTTP：`chat/stream` NDJSON 解析；请求带 `server_tts` |
-| `ReplyNotifyClient` | WebSocket 订阅 `/api/reply/notify` |
-| `ReplyAudioPlayer` | 按 `seq` 排队播放 PCM/MP3，独立线程，不阻塞采集 |
-| `VoiceServerConfig` | `serverReplyTts`、`replyNotifyEnabled` 等开关 |
-| `VoiceServerListener` | UI 回调：`onReplyNotify`、`onReplyPlayStart/End` 等 |
+| `VoiceServerBridge` | 桥接 `VoiceEngine` 与服务端；段结束触发 `chat/stream`；`bindDevice()`；管理 notify 连接 |
+| `PophieApiClient` | HTTP：`chat/stream` NDJSON、`POST /api/device/bind`；请求带 `device_id`、`server_tts` |
+| `ReplyNotifyClient` | WebSocket 订阅 `/api/reply/notify`（绑定后使用返回的 `user_id`/`robot_id`） |
+| `ReplyAudioPlayer` | 按**轮次 + seq** FIFO 排队播放 PCM/MP3，独立线程，不阻塞采集 |
+| `VoiceServerConfig` | `deviceId`、`serverReplyTts`、`replyNotifyEnabled` 等 |
+| `VoiceServerListener` | UI 回调：`onReplyNotify`（`phase=speak` 展示文本）、`onReplyPlayStart/End` 等 |
 
 ### 5.1 对话时序（路径 A）
 
 ```
+App 启动 → ensureDeviceId() 持久化 device_id
+    → 用户点「绑定设备」→ POST /api/device/bind → 保存 user_id / robot_id
 用户说话 → VoiceEngine 断句 → VoiceServerBridge.onSegmentEnd
     ├─ uploadSegmentLog（可选，POST /api/voice/segments）
     └─ requestChatStream（后台线程）
-           POST /api/chat/stream { skip_tts: true, server_tts: true, audio: wav }
-           ├─ reply/speak → UI 展示文本
+           POST /api/chat/stream { device_id, skip_tts: true, server_tts: true, audio: wav }
+           ├─ reply.phase=speak → UI 展示文本（勿重复消费 type=speak）
            ├─ tts_meta + tts_chunk → ReplyAudioPlayer 缓冲
            └─ speak_done → 播放该 seq
 （同时 VoiceEngine 可继续采集下一段，互不阻塞）
@@ -201,12 +210,13 @@ ws://<host>:<port>/api/reply/notify?robot_id=<id>&user_id=<id>&session_id=<可�
 ### 5.2 主动推送时序（路径 B）
 
 ```
-App 启动 / connectRealtime / testConnection
-    → ReplyNotifyClient.connect(/api/reply/notify)
-服务端 ProactiveService / ReminderService
+绑定设备后 App 启动 / connectRealtime / testConnection
+    → ReplyNotifyClient.connect(/api/reply/notify?robot_id&user_id)
+服务端 ProactiveService / ReminderService / POST /api/reply/test
     → ReplyNotifyService.notifyReply(text, source)
     → WebSocket 推送与 chat/stream 相同的事件
-    → ReplyAudioPlayer（与路径 A 共用队列）
+    → 文本落库 pb_chat_conversations
+    → ReplyAudioPlayer（与路径 A 共用队列，按轮次 FIFO）
 ```
 
 ### 5.3 配置示例
@@ -214,11 +224,11 @@ App 启动 / connectRealtime / testConnection
 ```java
 VoiceServerConfig config = new VoiceServerConfig.Builder()
     .baseUrl("http://192.168.1.100:9901/")
-    .robotId("default")
-    .userId("demo")
-    .serverReplyTts(true)      // chat/stream 请求服务端 TTS
-    .replyNotifyEnabled(true)  // 订阅主动回复 WebSocket
+    .deviceId("android-abc123")   // 绑定前生成并持久化
+    .serverReplyTts(true)
+    .replyNotifyEnabled(true)
     .build();
+// bindDevice() 成功后 config 内 robotId / userId 由服务端返回
 ```
 
 ---
@@ -227,9 +237,11 @@ VoiceServerConfig config = new VoiceServerConfig.Builder()
 
 | 接口 | 文档章节 |
 |------|----------|
+| `POST /api/device/bind` | [API对接文档 §3.17](./API对接文档.md#317-用户与设备绑定) |
 | `POST /api/chat/stream` | [API对接文档 §3.4.1](./API对接文档.md#341-流式聊天-apichatstream) |
 | `WS /api/reply/notify` | [API对接文档 §3.8.1](./API对接文档.md#381-回复通知websocket-apireplynotify) |
-| `POST /api/voice/segments` | 语音段流水（与实时 STT 配合，见 API 文档后续补充） |
+| `POST /api/reply/test` | [API对接文档 §3.8.2](./API对接文档.md#382-联调测试回复推送-apireplytest) |
+| `POST /api/voice/segments` | [API对接文档 §3.10.1](./API对接文档.md#3101-语音段流水) |
 | `WS /api/stt/stream` | 实时 STT（`RealtimeSttClient`，与回复播放并行） |
 
 ---
@@ -249,6 +261,7 @@ VoiceServerConfig config = new VoiceServerConfig.Builder()
 
 | 字段 | 默认 | 说明 |
 |------|------|------|
+| `VoiceServerConfig.deviceId` | — | 端侧唯一 ID，绑定 API 必填 |
 | `VoiceServerConfig.serverReplyTts` | `true` | 请求体 `input.server_tts` |
 | `VoiceServerConfig.replyNotifyEnabled` | `true` | 是否连接 `reply/notify` |
 
@@ -260,11 +273,14 @@ VoiceServerConfig config = new VoiceServerConfig.Builder()
    ```bash
    cd server-java && bash deploy/macos-deploy.sh
    ```
-2. Android Studio 编译 `voicedemo`，Base URL 指向 Docker 端口（默认 **9901**）
-3. 开启 chat + 实时 STT，说话触发对话 → UI 显示回复文本 + 扬声器播放  
-4. 播放过程中继续说话 → 采集与 STT 不应中断  
-5. 触发主动消息/提醒 → `reply/notify` WebSocket 收到事件并播放  
-6. **快速联调**：`POST /api/reply/test`（或 Demo「测试回复推送」按钮），无需说话即可验证 notify + TTS
+2. **已有数据库**执行 `server-java/src/main/resources/db/migrate_user_device.sql`（用户/设备表）
+3. Android Studio 编译 `voicedemo`，Base URL 指向 Docker 端口（默认 **9901**）
+4. 填 URL → **绑定设备** → 测连接
+5. 开启 chat + 实时 STT，说话触发对话 → UI 显示回复文本 + 扬声器播放  
+6. 播放过程中继续说话 → 采集与 STT 不应中断  
+7. 触发主动消息/提醒 → `reply/notify` WebSocket 收到事件并播放  
+8. **快速联调**：`POST /api/reply/test`（或 Demo「测试回复推送」按钮），无需说话即可验证 notify + TTS
+9. 管理后台或 `GET /api/conversations?user_id=` 可看到助手回复文本；**无 TTS 音频记录**
 
 ---
 
@@ -274,6 +290,7 @@ VoiceServerConfig config = new VoiceServerConfig.Builder()
 
 - `server-java/src/main/java/com/pophie/service/ReplyStreamEmitter.java`
 - `server-java/src/main/java/com/pophie/service/ReplyNotifyService.java`
+- `server-java/src/main/java/com/pophie/service/DeviceBindService.java`
 - `server-java/src/main/java/com/pophie/service/ChatService.java`（`chatStream`）
 - `server-java/src/main/java/com/pophie/websocket/ReplyNotifyWebSocketHandler.java`
 - `server-java/src/main/java/com/pophie/schema/ChatInput.java`（`serverTts`）

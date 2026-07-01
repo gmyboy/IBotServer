@@ -58,7 +58,7 @@ public class ProactiveService {
 
     public Map<String, Object> perceiveAndRespond(String robotId, String sessionId,
                                                   Map<String, Object> signal, String userId) {
-        List<Map<String, Object>> mems = memory.recallForResponse(robotId, sessionId, String.valueOf(signal), 6);
+        List<Map<String, Object>> mems = memory.recallForResponse(userId, sessionId, String.valueOf(signal), 6);
         log.info("[proactive] 召回 {} 条长期记忆用于决策", mems.size());
         String memText = memory.formatMemoriesForPrompt(mems);
 

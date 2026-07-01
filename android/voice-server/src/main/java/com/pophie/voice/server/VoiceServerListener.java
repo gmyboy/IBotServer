@@ -35,6 +35,9 @@ public interface VoiceServerListener {
      */
     default void onConnectionTested(boolean speechEnabled, String sessionId, String error) {}
 
+    /** 设备绑定完成（{@link VoiceServerBridge#bindDevice()}）。 */
+    default void onDeviceBound(PophieApiClient.BindInfo info, String error) {}
+
     /** 语音段流水已上传。 */
     default void onSegmentLogged(long logId, boolean isOwner, String sttText) {}
 

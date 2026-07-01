@@ -10,6 +10,21 @@
         android:orientation="vertical"
         android:padding="16dp">
 
+        <Button
+            android:id="@+id/btnBindDevice"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="绑定设备" />
+
+        <TextView
+            android:id="@+id/deviceBindInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:textSize="12sp"
+            android:textColor="#616161"
+            android:text="设备：未绑定" />
+
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"

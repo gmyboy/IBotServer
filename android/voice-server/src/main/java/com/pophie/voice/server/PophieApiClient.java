@@ -32,14 +32,37 @@ public final class PophieApiClient {
             .writeTimeout(60, TimeUnit.SECONDS)
             .build();
 
-    private final String robotId;
-    private final String userId;
+    private String robotId;
+    private String userId;
+    private String deviceId;
     private String baseUrl;
 
     public PophieApiClient(VoiceServerConfig config) {
         this.robotId = config.robotId;
         this.userId = config.userId;
+        this.deviceId = config.deviceId == null ? "" : config.deviceId;
         setBaseUrl(config.baseUrl);
+    }
+
+    public String getRobotId() {
+        return robotId;
+    }
+
+    public String getUserId() {
+        return userId;
+    }
+
+    public String getDeviceId() {
+        return deviceId;
+    }
+
+    public void setDeviceId(String id) {
+        deviceId = id == null ? "" : id.trim();
+    }
+
+    public void applyIdentity(String newRobotId, String newUserId) {
+        if (newRobotId != null && !newRobotId.isEmpty()) robotId = newRobotId;
+        if (newUserId != null && !newUserId.isEmpty()) userId = newUserId;
     }
 
     public void setBaseUrl(String url) {
@@ -73,8 +96,49 @@ public final class PophieApiClient {
         }
     }
 
+    /** 设备绑定：以 device_id 关联用户，更新本地 robot_id / user_id。 */
+    public BindInfo bindDevice() throws IOException {
+        if (deviceId == null || deviceId.isEmpty()) {
+            throw new IOException("device_id 未配置");
+        }
+        try {
+            JSONObject root = new JSONObject();
+            root.put("device_id", deviceId);
+            if (userId != null && !userId.isEmpty() && !"demo".equals(userId)) {
+                root.put("user_id", userId);
+            }
+            if (robotId != null && !robotId.isEmpty() && !"default".equals(robotId)) {
+                root.put("robot_id", robotId);
+            }
+            Request req = new Request.Builder()
+                    .url(baseUrl + "api/device/bind")
+                    .post(RequestBody.create(root.toString(), JSON))
+                    .build();
+            try (Response resp = client.newCall(req).execute()) {
+                String body = resp.body() != null ? resp.body().string() : "";
+                if (!resp.isSuccessful()) {
+                    throw new IOException("HTTP " + resp.code() + ": " + body);
+                }
+                JSONObject json = new JSONObject(body);
+                String rid = json.optString("robot_id", robotId);
+                String uid = json.optString("user_id", userId);
+                applyIdentity(rid, uid);
+                return new BindInfo(deviceId, rid, uid,
+                        json.optBoolean("new_user", false),
+                        json.optBoolean("new_device", false));
+            }
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+    }
+
     public SessionInfo newSession() throws IOException {
-        String q = "robot_id=" + robotId + "&user_id=" + userId;
+        String q;
+        if (deviceId != null && !deviceId.isEmpty()) {
+            q = "device_id=" + deviceId;
+        } else {
+            q = "robot_id=" + robotId + "&user_id=" + userId;
+        }
         Request req = new Request.Builder()
                 .url(baseUrl + "api/session/new?" + q)
                 .post(RequestBody.create("", JSON))
@@ -85,10 +149,13 @@ public final class PophieApiClient {
                 throw new IOException("HTTP " + resp.code() + ": " + body);
             }
             JSONObject json = new JSONObject(body);
+            String rid = json.optString("robot_id", robotId);
+            String uid = json.optString("user_id", userId);
+            applyIdentity(rid, uid);
             return new SessionInfo(
                     json.optString("session_id", ""),
-                    json.optString("robot_id", robotId),
-                    json.optString("user_id", userId));
+                    rid,
+                    uid);
         } catch (JSONException e) {
             throw new IOException(e);
         }
@@ -148,6 +215,9 @@ public final class PophieApiClient {
             JSONObject root = new JSONObject();
             root.put("robot_id", robotId);
             root.put("user_id", userId);
+            if (deviceId != null && !deviceId.isEmpty()) {
+                root.put("device_id", deviceId);
+            }
             if (sessionId != null && !sessionId.isEmpty()) {
                 root.put("session_id", sessionId);
             }
@@ -267,6 +337,9 @@ public final class PophieApiClient {
             JSONObject root = new JSONObject();
             root.put("robot_id", robotId);
             root.put("user_id", userId);
+            if (deviceId != null && !deviceId.isEmpty()) {
+                root.put("device_id", deviceId);
+            }
             if (sessionId != null && !sessionId.isEmpty()) {
                 root.put("session_id", sessionId);
             }
@@ -372,6 +445,22 @@ public final class PophieApiClient {
 
     public interface SpeakListener {
         void onSpeak(String text);
+    }
+
+    public static final class BindInfo {
+        public final String deviceId;
+        public final String robotId;
+        public final String userId;
+        public final boolean newUser;
+        public final boolean newDevice;
+
+        BindInfo(String deviceId, String robotId, String userId, boolean newUser, boolean newDevice) {
+            this.deviceId = deviceId;
+            this.robotId = robotId;
+            this.userId = userId;
+            this.newUser = newUser;
+            this.newDevice = newDevice;
+        }
     }
 
     public static final class HealthInfo {

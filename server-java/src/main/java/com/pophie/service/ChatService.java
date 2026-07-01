@@ -85,10 +85,11 @@ public class ChatService {
     private final RobotService robotService;
     private final ConversationRepository conversationRepo;
     private final Executor bgExecutor;
+    private final DeviceBindService deviceBind;
 
     public ChatService(RuntimeConfigService cfg, LlmService llm, MemoryService memory,
                        ReminderService reminder, SpeechService speech, RobotService robotService,
-                       ConversationRepository conversationRepo,
+                       ConversationRepository conversationRepo, DeviceBindService deviceBind,
                        @Qualifier("dbExecutor") Executor bgExecutor) {
         this.cfg = cfg;
         this.llm = llm;
@@ -97,6 +98,7 @@ public class ChatService {
         this.speech = speech;
         this.robotService = robotService;
         this.conversationRepo = conversationRepo;
+        this.deviceBind = deviceBind;
         this.bgExecutor = bgExecutor;
     }
 
@@ -174,9 +176,9 @@ public class ChatService {
         return v;
     }
 
-    private List<Map<String, Object>> recentConversations(String robotId, String sessionId, int n) {
-        List<ConversationEntity> rows = conversationRepo.findByRobotIdAndSessionIdOrderByIdDesc(
-                robotId, sessionId, PageRequest.of(0, n));
+    private List<Map<String, Object>> recentConversations(String userId, String sessionId, int n) {
+        List<ConversationEntity> rows = conversationRepo.findByUserIdAndSessionIdOrderByIdDesc(
+                userId, sessionId, PageRequest.of(0, n));
         Collections.reverse(rows);
         List<Map<String, Object>> result = new ArrayList<>();
         for (ConversationEntity r : rows) {
@@ -318,11 +320,11 @@ public class ChatService {
         return "[非语言信号 " + perceptionStr + "]";
     }
 
-    private BuiltHistory buildChatHistory(String robotId, String sessionId, String userText) {
+    private BuiltHistory buildChatHistory(String robotId, String sessionId, String userId, String userText) {
         int recentN = chatRecentTurns();
         int recallK = chatRecallTopK();
-        List<Map<String, Object>> recent = recentConversations(robotId, sessionId, recentN);
-        List<Map<String, Object>> mems = memory.recallForResponse(robotId, sessionId, userText, recallK);
+        List<Map<String, Object>> recent = recentConversations(userId, sessionId, recentN);
+        List<Map<String, Object>> mems = memory.recallForResponse(userId, sessionId, userText, recallK);
         String memBlock = memory.formatMemoriesForPrompt(mems);
         List<Map<String, Object>> history = new ArrayList<>();
         Map<String, Object> sys = new LinkedHashMap<>();
@@ -385,7 +387,7 @@ public class ChatService {
                 List<Map<String, Object>> remItems = text.isEmpty()
                         ? new ArrayList<>() : reminder.extractReminders(text);
                 if (!remItems.isEmpty()) {
-                    reminder.scheduleReminders(robotId, sessionId, text, remItems);
+                    reminder.scheduleReminders(robotId, sessionId, userId, text, remItems);
                 }
                 log.info("[chat.bg] 后台完成 reminders={}", remItems.size());
             } catch (Exception e) {
@@ -397,8 +399,10 @@ public class ChatService {
     // ---------- /api/chat ----------
 
     public ChatResponse chat(ChatRequest req) {
-        String robotId = resolveRobot(req.getRobotId());
-        String userId = resolveUser(req.getUserId());
+        DeviceBindService.ResolvedIdentity id = deviceBind.resolve(
+                req.getDeviceId(), req.getRobotId(), req.getUserId());
+        String robotId = id.robotId();
+        String userId = id.userId();
         String sessionId = ensureSession(req.getSessionId());
         robotService.touchRobot(robotId);
 
@@ -433,7 +437,7 @@ public class ChatService {
         userMeta.put("stt", prepared.stt);
         saveConv(robotId, sessionId, "user", userText, "text", userMeta, userId);
 
-        BuiltHistory bh = buildChatHistory(robotId, sessionId, userText);
+        BuiltHistory bh = buildChatHistory(robotId, sessionId, userId, userText);
 
         boolean deferSide = RuntimeConfigService.bool(cfg.chat(), "defer_side_tasks", true);
         Map<String, Object> ingestResult = new LinkedHashMap<>();
@@ -471,7 +475,7 @@ public class ChatService {
         }
 
         List<Long> remIds = remItems.isEmpty()
-                ? new ArrayList<>() : reminder.scheduleReminders(robotId, sessionId, prepared.text, remItems);
+                ? new ArrayList<>() : reminder.scheduleReminders(robotId, sessionId, userId, prepared.text, remItems);
         List<Object> scheduled = new ArrayList<>();
         for (int i = 0; i < remIds.size() && i < remItems.size(); i++) {
             Map<String, Object> s = new LinkedHashMap<>();
@@ -497,8 +501,10 @@ public class ChatService {
     // ---------- /api/chat/stream ----------
 
     public void chatStream(ChatRequest req, Consumer<String> emit) {
-        String robotId = resolveRobot(req.getRobotId());
-        String userId = resolveUser(req.getUserId());
+        DeviceBindService.ResolvedIdentity id = deviceBind.resolve(
+                req.getDeviceId(), req.getRobotId(), req.getUserId());
+        String robotId = id.robotId();
+        String userId = id.userId();
         String sessionId = ensureSession(req.getSessionId());
         robotService.touchRobot(robotId);
 
@@ -527,7 +533,7 @@ public class ChatService {
         userMeta.put("stt", prepared.stt);
         saveConv(robotId, sessionId, "user", userText, "text", userMeta, userId);
 
-        BuiltHistory bh = buildChatHistory(robotId, sessionId, userText);
+        BuiltHistory bh = buildChatHistory(robotId, sessionId, userId, userText);
         boolean deferSide = RuntimeConfigService.bool(cfg.chat(), "defer_side_tasks", true);
         boolean serverTts = shouldServerTts(chatInput);
         VoiceProsody voice = chatInput.getPerception() != null ? chatInput.getPerception().getVoice() : null;

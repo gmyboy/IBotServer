@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.os.Bundle;
+import android.provider.Settings;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
@@ -25,6 +26,7 @@ import com.pophie.voice.VoiceError;
 import com.pophie.voice.VoiceListener;
 import com.pophie.voice.VoiceSegment;
 import com.pophie.voice.WavUtil;
+import com.pophie.voice.server.PophieApiClient;
 import com.pophie.voice.server.VoiceServerBridge;
 import com.pophie.voice.server.VoiceServerConfig;
 import com.pophie.voice.server.VoiceServerListener;
@@ -39,6 +41,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREFS = "voice_demo";
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_SESSION_ID = "session_id";
+    private static final String KEY_DEVICE_ID = "device_id";
 
     private static final String ENROLL_TEXT = "你好，我是你的主人，以后主要由我来跟你说话，记住我的声音就好";
 
@@ -48,7 +51,7 @@ public class MainActivity extends AppCompatActivity {
     private VoiceServerBridge serverBridge;
 
     private TextView status, speaker, meter, log, enrollHint, verifyResult, cohortInfo;
-    private TextView serverStatus, sttResult, replyResult;
+    private TextView serverStatus, sttResult, replyResult, deviceBindInfo;
     private EditText serverUrl;
     private SwitchMaterial switchRealtimeStt;
     private SwitchMaterial switchChat;
@@ -76,6 +79,7 @@ public class MainActivity extends AppCompatActivity {
         serverStatus = findViewById(R.id.serverStatus);
         sttResult = findViewById(R.id.sttResult);
         replyResult = findViewById(R.id.replyResult);
+        deviceBindInfo = findViewById(R.id.deviceBindInfo);
 
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String savedUrl = prefs.getString(KEY_SERVER_URL, "http://192.168.23.156:9901/");
@@ -83,6 +87,7 @@ public class MainActivity extends AppCompatActivity {
 
         serverUrl.setText(savedUrl);
         initServerBridge(savedUrl, sessionId);
+        updateDeviceBindInfoLine();
 
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
@@ -95,6 +100,7 @@ public class MainActivity extends AppCompatActivity {
         btnVerify.setOnClickListener(v -> verifyOwner());
         btnCohort.setOnClickListener(v -> addCohort());
         btnTestServer.setOnClickListener(v -> testServerConnection());
+        findViewById(R.id.btnBindDevice).setOnClickListener(v -> bindDevice());
         findViewById(R.id.btnTestReply).setOnClickListener(v -> testReplyPush());
 
         serverUrl.setOnFocusChangeListener((v, hasFocus) -> {
@@ -165,8 +171,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void initServerBridge(String baseUrl, String sessionId) {
+        String deviceId = ensureDeviceId();
         VoiceServerConfig config = new VoiceServerConfig.Builder()
                 .baseUrl(baseUrl)
+                .deviceId(deviceId)
                 .build();
         serverBridge = new VoiceServerBridge(config);
         serverBridge.setSessionId(sessionId);
@@ -254,9 +262,22 @@ public class MainActivity extends AppCompatActivity {
                     return;
                 }
                 persistSessionId(sid);
+                updateDeviceBindInfoLine();
                 String speech = speechEnabled ? "speech=开" : "speech=关";
                 serverStatus.setText("服务：OK  " + speech + "  session=" + sid);
                 toast(speechEnabled ? "连接正常" : "speech 未启用");
+            }
+
+            @Override
+            public void onDeviceBound(PophieApiClient.BindInfo info, String error) {
+                if (error != null) {
+                    deviceBindInfo.setText("设备：绑定失败 " + error);
+                    toast("绑定失败：" + error);
+                    return;
+                }
+                updateDeviceBindInfoLine(info);
+                String tag = info.newUser ? "（新用户）" : info.newDevice ? "（新设备）" : "";
+                toast("绑定成功" + tag);
             }
 
             @Override
@@ -279,6 +300,18 @@ public class MainActivity extends AppCompatActivity {
         serverBridge.setChatEnabled(switchChat.isChecked());
     }
 
+    private String ensureDeviceId() {
+        SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        String saved = prefs.getString(KEY_DEVICE_ID, "");
+        if (saved != null && !saved.isEmpty()) return saved;
+        String androidId = Settings.Secure.getString(getContentResolver(), Settings.Secure.ANDROID_ID);
+        String id = (androidId != null && !androidId.isEmpty() && !"9774d56d682e549c".equals(androidId))
+                ? "android-" + androidId
+                : "dev-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        prefs.edit().putString(KEY_DEVICE_ID, id).apply();
+        return id;
+    }
+
     private void persistServerUrl() {
         String url = serverUrl.getText().toString().trim();
         serverBridge.setBaseUrl(url);
@@ -291,6 +324,32 @@ public class MainActivity extends AppCompatActivity {
                 .edit()
                 .putString(KEY_SESSION_ID, serverBridge.getSessionId())
                 .apply();
+    }
+
+    private void bindDevice() {
+        persistServerUrl();
+        deviceBindInfo.setText("设备：绑定中…");
+        serverBridge.bindDevice();
+    }
+
+    private void updateDeviceBindInfoLine() {
+        if (serverBridge == null) return;
+        updateDeviceBindInfoLine(null);
+    }
+
+    private void updateDeviceBindInfoLine(PophieApiClient.BindInfo info) {
+        String did = serverBridge.getDeviceId();
+        String uid = info != null ? info.userId : serverBridge.getBoundUserId();
+        String rid = info != null ? info.robotId : serverBridge.getBoundRobotId();
+        if (did == null || did.isEmpty()) {
+            deviceBindInfo.setText("设备：未配置 device_id");
+            return;
+        }
+        if ("demo".equals(uid) && "default".equals(rid)) {
+            deviceBindInfo.setText("设备：" + did + "  ·  未绑定（请点「绑定设备」）");
+        } else {
+            deviceBindInfo.setText("设备：" + did + "\n用户：" + uid + "  ·  机器人：" + rid);
+        }
     }
 
     private void testServerConnection() {

@@ -187,11 +187,48 @@ public final class VoiceServerBridge {
         pendingSttPatchLogId = 0;
     }
 
+    /** 仅绑定设备（获取 user_id / robot_id），不建会话。 */
+    public void bindDevice() {
+        new Thread(() -> {
+            try {
+                if (config.deviceId == null || config.deviceId.isEmpty()) {
+                    throw new IOException("device_id 未配置");
+                }
+                PophieApiClient.BindInfo info = api.bindDevice();
+                connectReplyNotify();
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onDeviceBound(info, null);
+                });
+            } catch (Exception e) {
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onDeviceBound(null, e.getMessage());
+                });
+            }
+        }).start();
+    }
+
+    public String getDeviceId() {
+        return config.deviceId == null ? "" : config.deviceId;
+    }
+
+    public String getBoundUserId() {
+        return api.getUserId();
+    }
+
+    public String getBoundRobotId() {
+        return api.getRobotId();
+    }
+
     /** 后台线程：健康检查 + 新建会话。 */
     public void testConnection() {
         new Thread(() -> {
             try {
                 PophieApiClient.HealthInfo health = api.checkHealth();
+                if (config.deviceId != null && !config.deviceId.isEmpty()) {
+                    api.bindDevice();
+                }
                 PophieApiClient.SessionInfo session = api.newSession();
                 sessionId = session.sessionId;
                 main.post(() -> {
@@ -353,7 +390,7 @@ public final class VoiceServerBridge {
 
     private boolean ensureReplyNotifyConnected(long readyTimeoutMs) {
         return replyNotify.connectIfNeeded(
-                api.getBaseUrl(), config.robotId, config.userId, sessionId,
+                api.getBaseUrl(), api.getRobotId(), api.getUserId(), sessionId,
                 createReplyNotifyHandler(), readyTimeoutMs);
     }
 

@@ -120,8 +120,8 @@ public class MemoryService {
         return e.getId();
     }
 
-    public List<Map<String, Object>> listMemories(String robotId, String layer, String sessionId, int limit) {
-        List<MemoryEntity> rows = repo.listMemories(robotId, layer, sessionId, PageRequest.of(0, limit));
+    public List<Map<String, Object>> listMemories(String userId, String layer, String sessionId, int limit) {
+        List<MemoryEntity> rows = repo.listMemories(userId, layer, sessionId, PageRequest.of(0, limit));
         List<Map<String, Object>> out = new ArrayList<>();
         for (MemoryEntity e : rows) out.add(memToDict(e));
         return out;
@@ -201,10 +201,10 @@ public class MemoryService {
     }
 
     /** 简易语义印证：标签交集 + 摘要子串。对应 find_similar_l3_l4。 */
-    public Map<String, Object> findSimilarL3L4(String robotId, String summary, List<Object> tags) {
+    public Map<String, Object> findSimilarL3L4(String userId, String summary, List<Object> tags) {
         List<Map<String, Object>> rows = new ArrayList<>();
-        rows.addAll(listMemories(robotId, "L3", null, 200));
-        rows.addAll(listMemories(robotId, "L4", null, 200));
+        rows.addAll(listMemories(userId, "L3", null, 200));
+        rows.addAll(listMemories(userId, "L4", null, 200));
         String sLow = summary.toLowerCase();
         Set<String> tagSet = new LinkedHashSet<>();
         for (Object t : tags) tagSet.add(String.valueOf(t).toLowerCase());
@@ -277,7 +277,7 @@ public class MemoryService {
             log.info("[ingest] 写入 L2 #{} imp={} emo={} retention={} summary={}",
                     l2Id, fmt2(importance), fmt2(emotion), fmt2(retention), summary);
 
-            Map<String, Object> existing = findSimilarL3L4(robotId, summary, tags);
+            Map<String, Object> existing = findSimilarL3L4(userId, summary, tags);
             if (existing != null) {
                 String exLayer = String.valueOf(existing.get("layer"));
                 Object exId = existing.get("id");
@@ -332,11 +332,11 @@ public class MemoryService {
         return result;
     }
 
-    /** 简易召回：L4 + L3 + 本会话 L2。对应 recall_for_response。 */
-    public List<Map<String, Object>> recallForResponse(String robotId, String sessionId, String query, int topK) {
-        List<Map<String, Object>> l4 = new ArrayList<>(listMemories(robotId, "L4", null, 20));
-        List<Map<String, Object>> l3 = new ArrayList<>(listMemories(robotId, "L3", null, 20));
-        List<Map<String, Object>> l2 = listMemories(robotId, "L2", sessionId, 10);
+    /** 简易召回：L4 + L3 + 本会话 L2（按 user_id 隔离）。 */
+    public List<Map<String, Object>> recallForResponse(String userId, String sessionId, String query, int topK) {
+        List<Map<String, Object>> l4 = new ArrayList<>(listMemories(userId, "L4", null, 20));
+        List<Map<String, Object>> l3 = new ArrayList<>(listMemories(userId, "L3", null, 20));
+        List<Map<String, Object>> l2 = listMemories(userId, "L2", sessionId, 10);
         double wEmo = RuntimeConfigService.dbl(cfg.memory(), "recall_emotion_weight", 0.5);
 
         l4.sort((a, b) -> Double.compare(recallScore(b, wEmo), recallScore(a, wEmo)));
