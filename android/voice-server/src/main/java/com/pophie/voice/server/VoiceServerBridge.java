@@ -412,10 +412,7 @@ public final class VoiceServerBridge {
             @Override
             public void onSpeak(String text, int seq) {
                 streamReply.append(text);
-                main.post(() -> {
-                    VoiceServerListener l = listener;
-                    if (l != null) l.onChatSpeakChunk(text);
-                });
+                // 展示走 onReply(phase=speak)；此处仅累积完整回复供 onChatComplete 兜底
             }
 
             @Override

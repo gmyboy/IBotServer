@@ -1,6 +1,10 @@
 package com.pophie.service;
 
+import com.pophie.config.RuntimeConfigService;
+import com.pophie.entity.ConversationEntity;
+import com.pophie.repository.ConversationRepository;
 import com.pophie.schema.VoiceProsody;
+import com.pophie.util.JsonUtil;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -8,8 +12,10 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
@@ -27,13 +33,21 @@ public class ReplyNotifyService {
     private static final Logger log = LoggerFactory.getLogger("pophie.reply");
 
     private final SpeechService speech;
+    private final ConversationRepository conversationRepo;
+    private final RuntimeConfigService cfg;
+    private final RobotService robotService;
     private final Executor bgExecutor;
     private final List<NotifySession> sessions = new CopyOnWriteArrayList<>();
     private final ConcurrentHashMap<String, Object> pushLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ExecutorService> userPushExecutors = new ConcurrentHashMap<>();
 
-    public ReplyNotifyService(SpeechService speech, @Qualifier("dbExecutor") Executor bgExecutor) {
+    public ReplyNotifyService(SpeechService speech, ConversationRepository conversationRepo,
+                              RuntimeConfigService cfg, RobotService robotService,
+                              @Qualifier("dbExecutor") Executor bgExecutor) {
         this.speech = speech;
+        this.conversationRepo = conversationRepo;
+        this.cfg = cfg;
+        this.robotService = robotService;
         this.bgExecutor = bgExecutor;
     }
 
@@ -68,9 +82,15 @@ public class ReplyNotifyService {
                                      String text, String source, boolean wait, long timeoutMs) {
         if (text == null || text.isBlank()) return;
         Runnable task = () -> {
+            String rid = resolveRobot(robotId);
+            String uid = resolveUser(userId);
+            String sid = resolveSessionId(sessionId, rid, uid);
+            robotService.touchRobot(rid);
+            saveReplyText(rid, uid, sid, text, source);
+
             for (NotifySession s : sessions) {
-                if (!s.matches(robotId, userId, sessionId)) continue;
-                pushToSession(s, text, source, sessionId);
+                if (!s.matches(rid, uid, sessionId)) continue;
+                pushToSession(s, text, source, sid);
             }
         };
         ExecutorService ex = userPushExecutor(robotId, userId);
@@ -83,6 +103,56 @@ public class ReplyNotifyService {
         } else {
             ex.execute(task);
         }
+    }
+
+    private String resolveSessionId(String paramSid, String robotId, String userId) {
+        if (paramSid != null && !paramSid.isBlank()) {
+            return ensureSession(paramSid);
+        }
+        for (NotifySession s : sessions) {
+            if (s.robotId.equals(robotId) && s.userId.equals(userId)
+                    && s.sessionId != null && !s.sessionId.isBlank()) {
+                return ensureSession(s.sessionId);
+            }
+        }
+        return ensureSession(null);
+    }
+
+    /** 仅落库回复文本（TTS 音频不落库），供管理后台对话列表查看。 */
+    private void saveReplyText(String robotId, String userId, String sessionId,
+                               String text, String source) {
+        Map<String, Object> meta = new LinkedHashMap<>();
+        meta.put("reply_source", source == null ? "notify" : source);
+        meta.put("channel", "reply_notify");
+        meta.put("server_tts", true);
+
+        ConversationEntity conv = new ConversationEntity();
+        conv.setRobotId(robotId);
+        conv.setUserId(userId);
+        conv.setSessionId(sessionId);
+        conv.setRole("assistant");
+        conv.setContent(text.trim());
+        conv.setModality("text");
+        conv.setMetadata(JsonUtil.dumps(meta));
+        conversationRepo.save(conv);
+
+        log.info("[reply/ws] saved conv robot={} session={} src={} text={}",
+                robotId, sessionId, source, text.substring(0, Math.min(40, text.length())));
+    }
+
+    private String resolveRobot(String robotId) {
+        if (robotId != null && !robotId.isEmpty()) return robotId;
+        return RuntimeConfigService.str(cfg.server(), "default_robot", "default");
+    }
+
+    private static String resolveUser(String userId) {
+        String uid = userId == null ? "" : userId.trim();
+        return uid.isEmpty() ? "default" : uid;
+    }
+
+    private static String ensureSession(String sessionId) {
+        return (sessionId != null && !sessionId.isEmpty())
+                ? sessionId : "sess-" + UUID.randomUUID().toString().replace("-", "").substring(0, 8);
     }
 
     private ExecutorService userPushExecutor(String robotId, String userId) {

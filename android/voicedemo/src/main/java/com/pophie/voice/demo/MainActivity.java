@@ -201,12 +201,6 @@ public class MainActivity extends AppCompatActivity {
             }
 
             @Override
-            public void onChatSpeakChunk(String chunk) {
-                chatReplyBuf.append(chunk);
-                replyResult.setText("回复：" + chatReplyBuf);
-            }
-
-            @Override
             public void onReplyNotify(String phase, String text, String source) {
                 if ("start".equals(phase)) {
                     chatReplyBuf.setLength(0);
