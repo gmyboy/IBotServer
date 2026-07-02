@@ -346,6 +346,18 @@
             android:text="回复：—" />
 
         <TextView
+            android:id="@+id/timingInfo"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:padding="6dp"
+            android:background="#FFF8E1"
+            android:textColor="#E65100"
+            android:textSize="12sp"
+            android:fontFamily="monospace"
+            android:text="⏱ 耗时：—" />
+
+        <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"

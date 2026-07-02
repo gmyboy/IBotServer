@@ -53,7 +53,7 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView status, speaker, meter, log, enrollHint, verifyResult, cohortInfo;
     private TextView serverStatus, sttResult, replyResult, deviceBindInfo;
-    private TextView tvUserInfo, tvRobotInfo;
+    private TextView tvUserInfo, tvRobotInfo, timingInfo;
     private EditText serverUrl;
     private EditText etUserNickname, etUserGender, etUserBirthday;
     private EditText etRobotName, etRobotPersona, etRobotGreeting;
@@ -68,6 +68,53 @@ public class MainActivity extends AppCompatActivity {
     private long bytes = 0;
     private final StringBuilder logBuf = new StringBuilder();
     private final StringBuilder chatReplyBuf = new StringBuilder();
+
+    private volatile long segEndTs;
+    private volatile long sttFinalTs;
+    private volatile long replyStartTs;
+    private volatile long firstSpeakTs;
+    private volatile long chatCompleteTs;
+    private volatile long replyDoneTs;
+    private volatile long replyPlayEndTs;
+    private volatile long segLoggedTs;
+    private volatile int currentSegSeq;
+    private volatile boolean sttFinalPending;
+
+    private void resetTiming() {
+        segEndTs = 0;
+        sttFinalTs = 0;
+        replyStartTs = 0;
+        firstSpeakTs = 0;
+        chatCompleteTs = 0;
+        replyDoneTs = 0;
+        replyPlayEndTs = 0;
+        segLoggedTs = 0;
+        sttFinalPending = false;
+    }
+
+    private void ms(StringBuilder sb, String label, long ts) {
+        if (ts > 0 && segEndTs > 0) {
+            sb.append(label).append('=').append(ts - segEndTs).append("ms  ");
+        }
+    }
+
+    private void updateTimingUi(String extra) {
+        StringBuilder sb = new StringBuilder();
+        sb.append("⏱ 段#").append(currentSegSeq).append(' ');
+        ms(sb, "STT", sttFinalTs);
+        ms(sb, "log上传", segLoggedTs);
+        ms(sb, "reply开始", replyStartTs);
+        ms(sb, "首字", firstSpeakTs);
+        ms(sb, "chat完成", chatCompleteTs);
+        ms(sb, "reply完成", replyDoneTs);
+        ms(sb, "播放完", replyPlayEndTs);
+        if (extra != null && !extra.isEmpty()) sb.append('[').append(extra).append(']');
+        final String text = sb.toString();
+        Log.d(TAG, text);
+        ui.post(() -> {
+            if (timingInfo != null) timingInfo.setText(text);
+        });
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -91,6 +138,7 @@ public class MainActivity extends AppCompatActivity {
         deviceBindInfo = findViewById(R.id.deviceBindInfo);
         tvUserInfo = findViewById(R.id.tvUserInfo);
         tvRobotInfo = findViewById(R.id.tvRobotInfo);
+        timingInfo = findViewById(R.id.timingInfo);
         etUserNickname = findViewById(R.id.etUserNickname);
         etUserGender = findViewById(R.id.etUserGender);
         etUserBirthday = findViewById(R.id.etUserBirthday);
@@ -287,6 +335,13 @@ public class MainActivity extends AppCompatActivity {
             public void onSttFinal(String text) {
                 String line = text.isEmpty() ? "（空）" : text;
                 sttResult.setText("STT：" + line + " ✓");
+                long now = System.currentTimeMillis();
+                if (segEndTs > 0) {
+                    sttFinalTs = now;
+                    updateTimingUi("stt final");
+                } else {
+                    sttFinalPending = true;
+                }
                 appendSttLog("final→" + line);
             }
 
@@ -298,14 +353,22 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onReplyNotify(String phase, String text, String source) {
+                long now = System.currentTimeMillis();
                 if ("start".equals(phase)) {
                     chatReplyBuf.setLength(0);
+                    replyStartTs = now;
                     replyResult.setText("回复：生成中…");
+                    updateTimingUi("reply start");
                 } else if ("speak".equals(phase) && text != null && !text.isEmpty()) {
+                    if (firstSpeakTs == 0) firstSpeakTs = now;
                     chatReplyBuf.append(text);
                     replyResult.setText("回复：" + chatReplyBuf + " 🔊");
+                    updateTimingUi("speaking");
                 } else if ("done".equals(phase)) {
-                    appendSttLog("notify[" + source + "]→" + chatReplyBuf);
+                    replyDoneTs = now;
+                    updateTimingUi("reply done");
+                    String tsStr = segEndTs > 0 ? "  [" + (replyDoneTs - segEndTs) + "ms]" : "";
+                    appendSttLog("notify[" + source + "]→" + chatReplyBuf + tsStr);
                 }
             }
 
@@ -318,6 +381,8 @@ public class MainActivity extends AppCompatActivity {
             public void onReplyPlayEnd(int seq) {
                 String line = chatReplyBuf.length() == 0 ? "（静默）" : chatReplyBuf.toString();
                 replyResult.setText("回复：" + line);
+                replyPlayEndTs = System.currentTimeMillis();
+                updateTimingUi("play end");
             }
 
             @Override
@@ -327,14 +392,20 @@ public class MainActivity extends AppCompatActivity {
                 }
                 String line = chatReplyBuf.length() == 0 ? "（静默）" : chatReplyBuf.toString();
                 replyResult.setText("回复：" + line + " …");
-                appendSttLog("chat→" + line);
+                chatCompleteTs = System.currentTimeMillis();
+                updateTimingUi("chat complete");
+                String tsStr = segEndTs > 0 ? "  [" + (chatCompleteTs - segEndTs) + "ms]" : "";
+                appendSttLog("chat→" + line + tsStr);
                 persistSessionId(serverBridge.getSessionId());
             }
 
             @Override
             public void onChatError(String message) {
                 replyResult.setText("回复：失败 " + message);
-                appendSttLog("chat ✗ " + message);
+                long errTs = System.currentTimeMillis();
+                updateTimingUi("error: " + message);
+                String tsStr = segEndTs > 0 ? "  [" + (errTs - segEndTs) + "ms]" : "";
+                appendSttLog("chat ✗ " + message + tsStr);
             }
 
             @Override
@@ -371,6 +442,8 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onSegmentLogged(long logId, boolean isOwner, String sttText) {
                 String owner = isOwner ? "主人" : "非主人";
+                segLoggedTs = System.currentTimeMillis();
+                updateTimingUi("log uploaded");
                 appendSttLog("流水#" + logId + " " + owner
                         + (sttText != null && !sttText.isEmpty() ? " →" + sttText : ""));
             }
@@ -632,11 +705,19 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onSegmentEnd(VoiceSegment seg) {
+                boolean sttAlreadyDone = sttFinalPending;
+                resetTiming();
+                segEndTs = System.currentTimeMillis();
+                currentSegSeq++;
+                if (sttAlreadyDone) {
+                    sttFinalTs = segEndTs;
+                }
                 if (switchChat.isChecked() && seg.durationMs >= 300) {
                     chatReplyBuf.setLength(0);
                     replyResult.setText("回复：…");
                 }
                 serverListener.onSegmentEnd(seg);
+                updateTimingUi("seg end");
                 String spkLabel = "—";
                 if (seg.speaker != null) {
                     spkLabel = seg.speaker.name != null ? seg.speaker.name : seg.speaker.state.toString();
