@@ -1,11 +1,21 @@
 -- Pophie MySQL schema：pb_{模块}_{表名}
 -- 新库直接执行；旧库请先跑 migrate_legacy_table_names.sql
+-- 旧库升级请执行 migrate_add_user_robot_fields.sql
 
 CREATE TABLE IF NOT EXISTS pb_core_robots (
     robot_id VARCHAR(255) NOT NULL PRIMARY KEY,
     display_name VARCHAR(255) NULL,
+    persona TEXT NULL,
+    voice_id VARCHAR(255) NULL,
+    voice_style TEXT NULL,
+    greeting TEXT NULL,
+    avatar_url VARCHAR(512) NULL,
+    language VARCHAR(32) NULL,
+    personality_tags TEXT NULL,
+    system_prompt TEXT NULL,
     created_at VARCHAR(255) NULL,
-    last_seen_at VARCHAR(255) NULL
+    last_seen_at VARCHAR(255) NULL,
+    updated_at VARCHAR(255) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS pb_core_owner_profiles (
@@ -22,6 +32,14 @@ CREATE TABLE IF NOT EXISTS pb_core_owner_profiles (
 CREATE TABLE IF NOT EXISTS pb_core_users (
     user_id VARCHAR(255) NOT NULL PRIMARY KEY,
     display_name VARCHAR(255) NULL,
+    nickname VARCHAR(255) NULL,
+    gender VARCHAR(32) NULL,
+    birthday VARCHAR(32) NULL,
+    avatar_url VARCHAR(512) NULL,
+    voice_data LONGTEXT NULL,
+    voice_data_format VARCHAR(32) NULL,
+    voice_data_sample_rate INT NULL,
+    voice_enrolled BIT(1) NULL,
     created_at VARCHAR(255) NULL,
     updated_at VARCHAR(255) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

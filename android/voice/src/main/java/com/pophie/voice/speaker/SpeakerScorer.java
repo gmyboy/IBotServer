@@ -19,7 +19,8 @@ import java.util.Map;
  */
 public final class SpeakerScorer {
 
-    private static final int MIN_COHORT_FOR_ASNORM = 8; // cohort 至少这么多才启用 AS-Norm
+    private static final int MIN_COHORT_FOR_ASNORM = 3;  // 推荐 ≥8；至少 3 条可启用 AS-Norm
+    private static final int COHORT_RECOMMENDED = 8;
     private static final int ASNORM_TOPK = 20;          // AS-Norm 取 top-K 个 cohort 分数
 
     private final SpeakerEmbeddingExtractor extractor;
@@ -52,6 +53,8 @@ public final class SpeakerScorer {
     public synchronized boolean asnormActive() {
         return store.ownerAsnorm() && cohort.size() >= MIN_COHORT_FOR_ASNORM;
     }
+
+    public int cohortRecommendedSize() { return COHORT_RECOMMENDED; }
 
     private double[] cohortStats(float[] emb) { return cohortStats(emb, false); }
 
@@ -95,9 +98,9 @@ public final class SpeakerScorer {
     public synchronized float currentOwnerThreshold() { return effectiveThreshold(); }
 
     /**
-     * 自动标定登记：主人连续说一段(建议 ~8s 多句)，切成多窗算 embedding，
-     * 质心作为主人声纹，并用"主人内部自相似分布"自动定阈值 = μ - 2σ（钳制到 [0.30,0.60]）。
-     * @return 标定出的阈值
+     * 自动标定登记：主人连续说一段(建议 ~8s 多句)，切成多窗算 embedding 质心。
+     * - cohort ≥3：AS-Norm + 主人/冒充者分布交叉定阈（推荐 ≥8 条 cohort）
+     * - 无 cohort：用各登记窗对质心的下分位相似度减边际，个性化裸 cosine 阈值并持久化
      */
     public synchronized double enrollOwnerAuto(String name, short[] longPcm) {
         short[] voiced = trimSilence(longPcm);
@@ -121,30 +124,58 @@ public final class SpeakerScorer {
         centroid = l2norm(centroid);
 
         store.put(name, centroid, true);
-        store.setOwnerThreshold(0); // 清掉旧版可能残留的高估阈值，无 cohort 时回退默认
+        store.clearOwnerCalibration();
 
-        // 注意：不用"单段 μ-2σ"自估阈值——同一段登记音频各窗高度相似，σ 极小会把阈值高估到 ~0.6，
-        // 导致跨句/隔时说话时同一个人也够不到。正确做法是 AS-Norm（需 cohort）；无 cohort 时用固定默认阈值。
         if (cohort.size() >= MIN_COHORT_FOR_ASNORM) {
-            double[] oc = cohortStats(centroid);            // 主人质心相对 cohort 的 μc/σc
-            List<Double> gen = new ArrayList<>();            // 真人(各登记窗)归一化分
+            double[] oc = cohortStats(centroid);
+            List<Double> gen = new ArrayList<>();
             for (float[] w : embs) {
                 double cos = cosine(w, centroid);
                 double[] sw = cohortStats(w);
                 gen.add(0.5 * ((cos - sw[0]) / sw[1] + (cos - oc[0]) / oc[1]));
             }
-            List<Double> imp = new ArrayList<>();            // 冒充者(各 cohort)归一化分
+            List<Double> imp = new ArrayList<>();
             for (float[] g : cohort.list()) {
                 double cos = cosine(g, centroid);
-                double[] sg = cohortStats(g, true);          // 剔除自匹配
+                double[] sg = cohortStats(g, true);
                 imp.add(0.5 * ((cos - sg[0]) / sg[1] + (cos - oc[0]) / oc[1]));
             }
             double nth = chooseThreshold(gen, imp);
             store.setOwnerCalibration(oc[0], oc[1], nth);
             return nth;
         }
-        // 无 cohort：用默认阈值（可由 setOwnerThreshold 手动微调）
-        return defaultThreshold;
+
+        double thr = calibrateNoCohort(embs, centroid);
+        store.setOwnerThreshold(thr);
+        return thr;
+    }
+
+    /**
+     * 无 cohort 时：用登记各窗对质心的相似度分布估个性化裸 cosine 阈值。
+     * 同一段登记内部相似度偏高，故取下分位并加较大边际，上界钳制避免高估。
+     */
+    private double calibrateNoCohort(List<float[]> embs, float[] centroid) {
+        if (embs.size() < 2) return defaultThreshold;
+
+        List<Double> scores = new ArrayList<>();
+        for (float[] w : embs) scores.add((double) cosine(w, centroid));
+        scores.sort(null);
+
+        int n = scores.size();
+        double min = scores.get(0);
+        int qIdx = Math.min(n - 1, Math.max(0, n / 4));
+        double q25 = scores.get(qIdx);
+        double median = scores.get(n / 2);
+        double spread = median - min;
+
+        // 窗间越一致，跨句相似度落差越大 → 边际加大
+        double margin = 0.07 + Math.max(0.0, 0.15 - spread * 2.0);
+        double raw = Math.min(q25, min + 0.04) - margin;
+        return clampThreshold(raw, 0.28, 0.48);
+    }
+
+    private static double clampThreshold(double v, double lo, double hi) {
+        return Math.max(lo, Math.min(hi, v));
     }
 
     /** 手动设置裸 cosine 阈值（无 cohort 路径用；AS-Norm 生效时以归一化阈值为准）。 */

@@ -51,7 +51,7 @@ public final class VoiceServerConfig {
     }
 
     public static final class Builder {
-        private String baseUrl = "http://192.168.23.156:9901/";
+        private String baseUrl = "http://192.168.23.156:9900/";
         private String robotId = "default";
         private String userId = "demo";
         private String deviceId = "";

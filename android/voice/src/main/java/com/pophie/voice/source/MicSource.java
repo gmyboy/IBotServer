@@ -1,7 +1,9 @@
 package com.pophie.voice.source;
 
+import android.Manifest;
 import android.annotation.SuppressLint;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
@@ -38,10 +40,15 @@ public final class MicSource implements AudioSource {
         this.agc = agc;
     }
 
-    @SuppressLint("MissingPermission") // 由上层在 start() 前确保 RECORD_AUDIO
+    @SuppressLint("MissingPermission")
     @Override
     public boolean start(FrameCallback callback) {
         if (running) return true;
+        if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
+                != PackageManager.PERMISSION_GRANTED) {
+            Log.e(TAG, "缺少 RECORD_AUDIO 权限");
+            return false;
+        }
         int minBuf = AudioRecord.getMinBufferSize(
                 sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT);
         if (minBuf == AudioRecord.ERROR || minBuf == AudioRecord.ERROR_BAD_VALUE) return false;

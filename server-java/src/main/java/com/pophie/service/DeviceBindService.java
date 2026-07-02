@@ -49,6 +49,7 @@ public class DeviceBindService {
             String name = trim(req.getDeviceName());
             if (name != null) dev.setDeviceName(name);
             deviceRepo.save(dev);
+            ensureUserExists(dev.getUserId());
             robotService.touchRobot(dev.getRobotId());
             log.info("[device] touch device={} user={} robot={}", deviceId, dev.getUserId(), dev.getRobotId());
             return new DeviceBindResponse(deviceId, dev.getUserId(), dev.getRobotId(), false, false);
@@ -58,6 +59,7 @@ public class DeviceBindService {
         String userId = trim(req.getUserId());
         if (userId == null) {
             userId = newUserId();
+            createUser(userId, trim(req.getDisplayName()));
             newUser = true;
         } else if (!userRepo.existsById(userId)) {
             createUser(userId, trim(req.getDisplayName()));
@@ -121,6 +123,14 @@ public class DeviceBindService {
                     .orElseThrow(() -> new ApiException(404, "设备未绑定"));
         }
         return userId == null || userId.isBlank() ? "default" : userId.trim();
+    }
+
+    private void ensureUserExists(String userId) {
+        if (userId == null || userId.isEmpty() || "demo".equals(userId)) return;
+        if (!userRepo.existsById(userId)) {
+            createUser(userId, null);
+            log.info("[device] auto-created missing user={}", userId);
+        }
     }
 
     private void createUser(String userId, String displayName) {

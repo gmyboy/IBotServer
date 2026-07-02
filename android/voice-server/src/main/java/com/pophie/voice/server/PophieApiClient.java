@@ -516,4 +516,200 @@ public final class PophieApiClient {
             this.replyText = replyText;
         }
     }
+
+    public UserProfileResult getUserProfile(String userId) throws IOException {
+        Request req = new Request.Builder()
+                .url(baseUrl + "api/users/" + userId + "/profile")
+                .get()
+                .build();
+        try (Response resp = client.newCall(req).execute()) {
+            String body = resp.body() != null ? resp.body().string() : "";
+            if (!resp.isSuccessful()) {
+                throw new IOException("HTTP " + resp.code() + ": " + body);
+            }
+            JSONObject json = new JSONObject(body);
+            return new UserProfileResult(
+                    json.optString("user_id", ""),
+                    json.optString("display_name", ""),
+                    json.optString("nickname", ""),
+                    json.optString("gender", ""),
+                    json.optString("birthday", ""),
+                    json.optString("avatar_url", ""),
+                    json.optBoolean("voice_enrolled", false),
+                    json.optString("created_at", ""),
+                    json.optString("updated_at", "")
+            );
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+    }
+
+    public UserProfileResult updateUserProfile(String userId, String nickname, String gender,
+                                                String birthday, String avatarUrl) throws IOException {
+        try {
+            JSONObject root = new JSONObject();
+            if (nickname != null) root.put("nickname", nickname);
+            if (gender != null) root.put("gender", gender);
+            if (birthday != null) root.put("birthday", birthday);
+            if (avatarUrl != null) root.put("avatar_url", avatarUrl);
+            Request req = new Request.Builder()
+                    .url(baseUrl + "api/users/" + userId + "/profile")
+                    .put(RequestBody.create(root.toString(), JSON))
+                    .build();
+            try (Response resp = client.newCall(req).execute()) {
+                String body = resp.body() != null ? resp.body().string() : "";
+                if (!resp.isSuccessful()) {
+                    throw new IOException("HTTP " + resp.code() + ": " + body);
+                }
+                JSONObject json = new JSONObject(body);
+                return new UserProfileResult(
+                        json.optString("user_id", ""),
+                        json.optString("display_name", ""),
+                        json.optString("nickname", ""),
+                        json.optString("gender", ""),
+                        json.optString("birthday", ""),
+                        json.optString("avatar_url", ""),
+                        json.optBoolean("voice_enrolled", false),
+                        json.optString("created_at", ""),
+                        json.optString("updated_at", "")
+                );
+            }
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+    }
+
+    public RobotConfigResult getRobotConfig(String robotId) throws IOException {
+        Request req = new Request.Builder()
+                .url(baseUrl + "api/robots/" + robotId + "/config")
+                .get()
+                .build();
+        try (Response resp = client.newCall(req).execute()) {
+            String body = resp.body() != null ? resp.body().string() : "";
+            if (!resp.isSuccessful()) {
+                throw new IOException("HTTP " + resp.code() + ": " + body);
+            }
+            JSONObject json = new JSONObject(body);
+            return new RobotConfigResult(
+                    json.optString("robot_id", ""),
+                    json.optString("display_name", ""),
+                    json.optString("persona", ""),
+                    json.optString("voice_id", ""),
+                    json.optString("voice_style", ""),
+                    json.optString("greeting", ""),
+                    json.optString("avatar_url", ""),
+                    json.optString("language", ""),
+                    json.optString("personality_tags", ""),
+                    json.optString("system_prompt", ""),
+                    json.optString("created_at", ""),
+                    json.optString("last_seen_at", ""),
+                    json.optString("updated_at", "")
+            );
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+    }
+
+    public RobotConfigResult updateRobotConfig(String robotId, String displayName, String persona,
+                                                String voiceId, String voiceStyle, String greeting,
+                                                String avatarUrl) throws IOException {
+        try {
+            JSONObject root = new JSONObject();
+            if (displayName != null) root.put("display_name", displayName);
+            if (persona != null) root.put("persona", persona);
+            if (voiceId != null) root.put("voice_id", voiceId);
+            if (voiceStyle != null) root.put("voice_style", voiceStyle);
+            if (greeting != null) root.put("greeting", greeting);
+            if (avatarUrl != null) root.put("avatar_url", avatarUrl);
+            Request req = new Request.Builder()
+                    .url(baseUrl + "api/robots/" + robotId + "/config")
+                    .put(RequestBody.create(root.toString(), JSON))
+                    .build();
+            try (Response resp = client.newCall(req).execute()) {
+                String body = resp.body() != null ? resp.body().string() : "";
+                if (!resp.isSuccessful()) {
+                    throw new IOException("HTTP " + resp.code() + ": " + body);
+                }
+                JSONObject json = new JSONObject(body);
+                return new RobotConfigResult(
+                        json.optString("robot_id", ""),
+                        json.optString("display_name", ""),
+                        json.optString("persona", ""),
+                        json.optString("voice_id", ""),
+                        json.optString("voice_style", ""),
+                        json.optString("greeting", ""),
+                        json.optString("avatar_url", ""),
+                        json.optString("language", ""),
+                        json.optString("personality_tags", ""),
+                        json.optString("system_prompt", ""),
+                        json.optString("created_at", ""),
+                        json.optString("last_seen_at", ""),
+                        json.optString("updated_at", "")
+                );
+            }
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+    }
+
+    public static final class UserProfileResult {
+        public final String userId;
+        public final String displayName;
+        public final String nickname;
+        public final String gender;
+        public final String birthday;
+        public final String avatarUrl;
+        public final boolean voiceEnrolled;
+        public final String createdAt;
+        public final String updatedAt;
+
+        UserProfileResult(String userId, String displayName, String nickname, String gender,
+                          String birthday, String avatarUrl, boolean voiceEnrolled,
+                          String createdAt, String updatedAt) {
+            this.userId = userId;
+            this.displayName = displayName;
+            this.nickname = nickname;
+            this.gender = gender;
+            this.birthday = birthday;
+            this.avatarUrl = avatarUrl;
+            this.voiceEnrolled = voiceEnrolled;
+            this.createdAt = createdAt;
+            this.updatedAt = updatedAt;
+        }
+    }
+
+    public static final class RobotConfigResult {
+        public final String robotId;
+        public final String displayName;
+        public final String persona;
+        public final String voiceId;
+        public final String voiceStyle;
+        public final String greeting;
+        public final String avatarUrl;
+        public final String language;
+        public final String personalityTags;
+        public final String systemPrompt;
+        public final String createdAt;
+        public final String lastSeenAt;
+        public final String updatedAt;
+
+        RobotConfigResult(String robotId, String displayName, String persona, String voiceId,
+                          String voiceStyle, String greeting, String avatarUrl, String language,
+                          String personalityTags, String systemPrompt, String createdAt,
+                          String lastSeenAt, String updatedAt) {
+            this.robotId = robotId;
+            this.displayName = displayName;
+            this.persona = persona;
+            this.voiceId = voiceId;
+            this.voiceStyle = voiceStyle;
+            this.greeting = greeting;
+            this.avatarUrl = avatarUrl;
+            this.language = language;
+            this.personalityTags = personalityTags;
+            this.systemPrompt = systemPrompt;
+            this.createdAt = createdAt;
+            this.lastSeenAt = lastSeenAt;
+            this.updatedAt = updatedAt;
+        }
+    }
 }

@@ -56,7 +56,17 @@ public final class EmbeddingStore {
         this.ownerCohortMean = cohortMean;
         this.ownerCohortStd = cohortStd <= 1e-6 ? 1 : cohortStd;
         this.ownerNormThreshold = normThreshold;
+        this.ownerThreshold = 0;
         save();
+    }
+
+    /** 清除 AS-Norm / 裸 cosine 标定（重新登记前调用）。 */
+    public synchronized void clearOwnerCalibration() {
+        ownerThreshold = 0;
+        ownerAsnorm = false;
+        ownerCohortMean = 0;
+        ownerCohortStd = 1;
+        ownerNormThreshold = 0;
     }
 
     public synchronized void put(String name, float[] embedding, boolean isOwner) {

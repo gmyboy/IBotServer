@@ -36,7 +36,7 @@ public final class SileroVad {
 
     /**
      * 喂入任意长度 float 帧（内部按 windowSize 缓冲，sherpa 标准用法）；
-     * 返回当前是否检测到语音（1=语音 / 0=静音）。
+     * 返回当前窗口的语音概率（0.0~1.0 连续值），供 Endpointer 做阈值判断。
      */
     public synchronized float prob(float[] frame) {
         if (frame != null && frame.length > 0) {

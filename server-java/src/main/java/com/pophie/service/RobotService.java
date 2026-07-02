@@ -9,8 +9,12 @@ import com.pophie.repository.ProactiveLogRepository;
 import com.pophie.repository.VoiceSegmentLogRepository;
 import com.pophie.repository.ReminderRepository;
 import com.pophie.repository.RobotRepository;
+import com.pophie.exception.ApiException;
+import com.pophie.schema.RobotConfigRequest;
+import com.pophie.schema.RobotConfigResponse;
 import com.pophie.util.TimeUtil;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -183,6 +187,57 @@ public class RobotService {
     private int deleteRobot(String robotId) {
         robotRepo.deleteById(robotId);
         return 1;
+    }
+
+    // ---------- 机器人配置 ----------
+
+    /** 获取机器人完整配置。 */
+    public RobotConfigResponse getRobotConfig(String robotId) {
+        RobotEntity r = robotRepo.findById(robotId)
+                .orElseThrow(() -> new ApiException(404, "机器人不存在: " + robotId));
+        return toConfigResponse(r);
+    }
+
+    /** 更新机器人配置（部分更新，仅覆盖非 null 字段）。 */
+    @Transactional
+    public RobotConfigResponse updateRobotConfig(String robotId, RobotConfigRequest req) {
+        RobotEntity r = robotRepo.findById(robotId).orElseGet(() -> {
+            RobotEntity n = new RobotEntity();
+            n.setRobotId(robotId);
+            n.setLastSeenAt(TimeUtil.isoNow());
+            return n;
+        });
+
+        if (req.getDisplayName() != null) r.setDisplayName(req.getDisplayName().trim());
+        if (req.getPersona() != null) r.setPersona(req.getPersona());
+        if (req.getVoiceId() != null) r.setVoiceId(req.getVoiceId().trim());
+        if (req.getVoiceStyle() != null) r.setVoiceStyle(req.getVoiceStyle());
+        if (req.getGreeting() != null) r.setGreeting(req.getGreeting());
+        if (req.getAvatarUrl() != null) r.setAvatarUrl(req.getAvatarUrl().trim());
+        if (req.getLanguage() != null) r.setLanguage(req.getLanguage().trim());
+        if (req.getPersonalityTags() != null) r.setPersonalityTags(req.getPersonalityTags());
+        if (req.getSystemPrompt() != null) r.setSystemPrompt(req.getSystemPrompt());
+
+        robotRepo.save(r);
+        return toConfigResponse(r);
+    }
+
+    private RobotConfigResponse toConfigResponse(RobotEntity r) {
+        return new RobotConfigResponse(
+                r.getRobotId(),
+                r.getDisplayName(),
+                r.getPersona(),
+                r.getVoiceId(),
+                r.getVoiceStyle(),
+                r.getGreeting(),
+                r.getAvatarUrl(),
+                r.getLanguage(),
+                r.getPersonalityTags(),
+                r.getSystemPrompt(),
+                r.getCreatedAt(),
+                r.getLastSeenAt(),
+                r.getUpdatedAt()
+        );
     }
 
     // ---------- 主人档案 ----------

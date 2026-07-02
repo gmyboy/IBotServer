@@ -10,4 +10,6 @@ public interface RobotRepository extends JpaRepository<RobotEntity, String> {
 
     @Query("SELECT r.robotId FROM RobotEntity r")
     List<String> allRobotIds();
+
+    List<RobotEntity> findByDisplayNameContaining(String displayName);
 }

@@ -26,6 +26,10 @@ import com.pophie.schema.VoiceProsody;
 import com.pophie.schema.VoiceSegmentSttPatchRequest;
 import com.pophie.schema.VoiceSegmentUploadRequest;
 import com.pophie.schema.VoiceSegmentUploadResponse;
+import com.pophie.schema.RobotConfigRequest;
+import com.pophie.schema.RobotConfigResponse;
+import com.pophie.schema.UserProfileRequest;
+import com.pophie.schema.UserProfileResponse;
 import com.pophie.service.DeviceBindService;
 import com.pophie.service.ChatService;
 import com.pophie.service.MemoryService;
@@ -34,6 +38,7 @@ import com.pophie.service.ReminderService;
 import com.pophie.service.ReplyNotifyService;
 import com.pophie.service.RobotService;
 import com.pophie.service.SpeechService;
+import com.pophie.service.UserService;
 import com.pophie.service.VoiceSegmentLogService;
 import com.pophie.util.JsonUtil;
 import org.springframework.data.domain.PageRequest;
@@ -78,12 +83,14 @@ public class ApiController {
     private final VoiceSegmentLogService voiceSegmentLog;
     private final ReplyNotifyService replyNotify;
     private final DeviceBindService deviceBind;
+    private final UserService userService;
 
     public ApiController(ChatService chatService, MemoryService memory, ReminderService reminder,
                          ProactiveService proactive, SpeechService speech, RobotService robotService,
                          MemoryRepository memoryRepo, ConversationRepository conversationRepo,
                          ProactiveLogRepository proactiveLogRepo, VoiceSegmentLogService voiceSegmentLog,
-                         ReplyNotifyService replyNotify, DeviceBindService deviceBind) {
+                         ReplyNotifyService replyNotify, DeviceBindService deviceBind,
+                         UserService userService) {
         this.chatService = chatService;
         this.memory = memory;
         this.reminder = reminder;
@@ -96,6 +103,7 @@ public class ApiController {
         this.voiceSegmentLog = voiceSegmentLog;
         this.replyNotify = replyNotify;
         this.deviceBind = deviceBind;
+        this.userService = userService;
     }
 
     @GetMapping("/health")
@@ -185,6 +193,48 @@ public class ApiController {
     @GetMapping("/device/bind")
     public DeviceBindResponse getDeviceBinding(@RequestParam String deviceId) {
         return deviceBind.getBinding(deviceId);
+    }
+
+
+    // ---------- 用户档案 ----------
+
+    @GetMapping("/users/{userId}/profile")
+    public UserProfileResponse getUserProfile(@PathVariable String userId) {
+        return userService.getProfile(userId);
+    }
+
+    @PutMapping("/users/{userId}/profile")
+    public UserProfileResponse updateUserProfile(@PathVariable String userId,
+                                                  @RequestBody UserProfileRequest req) {
+        return userService.updateProfile(userId, req);
+    }
+
+    @GetMapping("/users/{userId}/voice")
+    public Map<String, Object> getUserVoiceData(@PathVariable String userId) {
+        return userService.getVoiceData(userId);
+    }
+
+    @DeleteMapping("/users/{userId}/voice")
+    public Map<String, Object> deleteUserVoiceData(@PathVariable String userId) {
+        return userService.deleteVoiceData(userId);
+    }
+
+    @GetMapping("/users/{userId}/robots")
+    public List<Map<String, Object>> listUserRobots(@PathVariable String userId) {
+        return userService.listBoundRobots(userId);
+    }
+
+    // ---------- 机器人配置 ----------
+
+    @GetMapping("/robots/{robotId}/config")
+    public RobotConfigResponse getRobotConfig(@PathVariable String robotId) {
+        return robotService.getRobotConfig(robotId);
+    }
+
+    @PutMapping("/robots/{robotId}/config")
+    public RobotConfigResponse updateRobotConfig(@PathVariable String robotId,
+                                                  @RequestBody RobotConfigRequest req) {
+        return robotService.updateRobotConfig(robotId, req);
     }
 
     @PostMapping("/session/new")

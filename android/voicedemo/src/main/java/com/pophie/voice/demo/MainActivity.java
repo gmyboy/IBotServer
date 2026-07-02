@@ -26,6 +26,7 @@ import com.pophie.voice.VoiceError;
 import com.pophie.voice.VoiceListener;
 import com.pophie.voice.VoiceSegment;
 import com.pophie.voice.WavUtil;
+import com.pophie.voice.model.ModelDownloadListener;
 import com.pophie.voice.server.PophieApiClient;
 import com.pophie.voice.server.VoiceServerBridge;
 import com.pophie.voice.server.VoiceServerConfig;
@@ -52,9 +53,17 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView status, speaker, meter, log, enrollHint, verifyResult, cohortInfo;
     private TextView serverStatus, sttResult, replyResult, deviceBindInfo;
+    private TextView tvUserInfo, tvRobotInfo;
     private EditText serverUrl;
+    private EditText etUserNickname, etUserGender, etUserBirthday;
+    private EditText etRobotName, etRobotPersona, etRobotGreeting;
     private SwitchMaterial switchRealtimeStt;
     private SwitchMaterial switchChat;
+    private static final int REQ_RECORD_AUDIO = 1;
+
+    private enum PendingAudioAction { NONE, ENROLL, VERIFY, COHORT, START }
+
+    private PendingAudioAction pendingAudioAction = PendingAudioAction.NONE;
     private volatile boolean enrolling = false;
     private long bytes = 0;
     private final StringBuilder logBuf = new StringBuilder();
@@ -80,6 +89,14 @@ public class MainActivity extends AppCompatActivity {
         sttResult = findViewById(R.id.sttResult);
         replyResult = findViewById(R.id.replyResult);
         deviceBindInfo = findViewById(R.id.deviceBindInfo);
+        tvUserInfo = findViewById(R.id.tvUserInfo);
+        tvRobotInfo = findViewById(R.id.tvRobotInfo);
+        etUserNickname = findViewById(R.id.etUserNickname);
+        etUserGender = findViewById(R.id.etUserGender);
+        etUserBirthday = findViewById(R.id.etUserBirthday);
+        etRobotName = findViewById(R.id.etRobotName);
+        etRobotPersona = findViewById(R.id.etRobotPersona);
+        etRobotGreeting = findViewById(R.id.etRobotGreeting);
 
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String savedUrl = prefs.getString(KEY_SERVER_URL, "http://192.168.23.156:9901/");
@@ -102,6 +119,10 @@ public class MainActivity extends AppCompatActivity {
         btnTestServer.setOnClickListener(v -> testServerConnection());
         findViewById(R.id.btnBindDevice).setOnClickListener(v -> bindDevice());
         findViewById(R.id.btnTestReply).setOnClickListener(v -> testReplyPush());
+        findViewById(R.id.btnSaveUser).setOnClickListener(v -> saveUserProfile());
+        findViewById(R.id.btnLoadUser).setOnClickListener(v -> loadUserProfile());
+        findViewById(R.id.btnSaveRobot).setOnClickListener(v -> saveRobotConfig());
+        findViewById(R.id.btnLoadRobot).setOnClickListener(v -> loadRobotConfig());
 
         serverUrl.setOnFocusChangeListener((v, hasFocus) -> {
             if (!hasFocus) persistServerUrl();
@@ -114,9 +135,12 @@ public class MainActivity extends AppCompatActivity {
             if (serverBridge != null) serverBridge.setChatEnabled(checked);
         });
 
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO}, 1);
+        if (!hasRecordAudio()) {
+            pendingAudioAction = PendingAudioAction.NONE;
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO},
+                    REQ_RECORD_AUDIO);
+        } else {
+            prewarmVoiceEngine();
         }
 
         buildEngine();
@@ -124,27 +148,7 @@ public class MainActivity extends AppCompatActivity {
 
         btnStart.setOnClickListener(v -> {
             if (enrolling) { toast("正在登记主人，请稍候"); return; }
-            persistServerUrl();
-            status.setText("状态：检查是否已登记主人…");
-            new Thread(() -> {
-                boolean enrolled = engine.isOwnerEnrolled();
-                ui.post(() -> {
-                    if (!enrolled) {
-                        toast("尚未登记主人，请先点【登记主人】");
-                        status.setText("状态：未登记主人");
-                        enrollHint.setText("⚠ 请先登记主人（连续说约 8 秒）：\n「" + ENROLL_TEXT + "」");
-                        return;
-                    }
-                    bytes = 0;
-                    syncServerFlags();
-                    serverBridge.connectReplyNotify();
-                    if (switchRealtimeStt.isChecked()) {
-                        serverBridge.connectRealtime();
-                    }
-                    engine.start();
-                    status.setText("状态：运行中");
-                });
-            }).start();
+            runWithRecordAudio(PendingAudioAction.START, this::startEngineAfterEnrollCheck);
         });
         btnStop.setOnClickListener(v -> {
             engine.stop();
@@ -168,6 +172,90 @@ public class MainActivity extends AppCompatActivity {
             toast("已切换为 " + mode + "，请重新开始");
             status.setText("状态：未启动");
         });
+    }
+
+    private boolean hasRecordAudio() {
+        return ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
+                == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private void runWithRecordAudio(PendingAudioAction action, Runnable task) {
+        if (!hasRecordAudio()) {
+            pendingAudioAction = action;
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.RECORD_AUDIO},
+                    REQ_RECORD_AUDIO);
+            toast("请允许录音权限");
+            return;
+        }
+        pendingAudioAction = PendingAudioAction.NONE;
+        task.run();
+    }
+
+    private void prewarmVoiceEngine() {
+        if (engine == null || enrolling) return;
+        new Thread(() -> {
+            try {
+                engine.ensureScorer();
+                ui.post(this::refreshCohortInfo);
+            } catch (Throwable t) {
+                Log.w(TAG, "prewarm scorer failed", t);
+            }
+        }, "voice-prewarm").start();
+    }
+
+    private void startEngineAfterEnrollCheck() {
+        persistServerUrl();
+        status.setText("状态：检查是否已登记主人…");
+        new Thread(() -> {
+            boolean enrolled = engine.isOwnerEnrolled();
+            ui.post(() -> {
+                if (!enrolled) {
+                    toast("尚未登记主人，请先点【登记主人】");
+                    status.setText("状态：未登记主人");
+                    enrollHint.setText("⚠ 请先登记主人（连续说约 8 秒）：\n「" + ENROLL_TEXT + "」");
+                    return;
+                }
+                bytes = 0;
+                syncServerFlags();
+                serverBridge.connectReplyNotify();
+                if (switchRealtimeStt.isChecked()) {
+                    serverBridge.connectRealtime();
+                }
+                engine.start();
+                status.setText("状态：运行中");
+            });
+        }).start();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQ_RECORD_AUDIO) return;
+        if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            prewarmVoiceEngine();
+            PendingAudioAction action = pendingAudioAction;
+            pendingAudioAction = PendingAudioAction.NONE;
+            switch (action) {
+                case ENROLL:
+                    enrollOwner();
+                    break;
+                case VERIFY:
+                    verifyOwner();
+                    break;
+                case COHORT:
+                    addCohort();
+                    break;
+                case START:
+                    startEngineAfterEnrollCheck();
+                    break;
+                default:
+                    break;
+            }
+        } else {
+            pendingAudioAction = PendingAudioAction.NONE;
+            toast("需要录音权限才能登记主人");
+            status.setText("状态：缺少录音权限");
+        }
     }
 
     private void initServerBridge(String baseUrl, String sessionId) {
@@ -349,7 +437,118 @@ public class MainActivity extends AppCompatActivity {
             deviceBindInfo.setText("设备：" + did + "  ·  未绑定（请点「绑定设备」）");
         } else {
             deviceBindInfo.setText("设备：" + did + "\n用户：" + uid + "  ·  机器人：" + rid);
+            loadUserProfile();
+            loadRobotConfig();
         }
+    }
+
+    private void loadUserProfile() {
+        tvUserInfo.setText("用户信息：加载中…");
+        serverBridge.fetchUserProfile(new VoiceServerBridge.ProfileCallback() {
+            @Override
+            public void onUserProfile(PophieApiClient.UserProfileResult profile) {
+                if (profile.nickname != null && !profile.nickname.isEmpty()) {
+                    etUserNickname.setText(profile.nickname);
+                }
+                if (profile.gender != null) etUserGender.setText(profile.gender);
+                if (profile.birthday != null) etUserBirthday.setText(profile.birthday);
+                String info = "用户：" + profile.userId;
+                if (profile.nickname != null && !profile.nickname.isEmpty()) {
+                    info += " 昵称：" + profile.nickname;
+                }
+                if (profile.voiceEnrolled) {
+                    info += " [声纹已录入]";
+                }
+                tvUserInfo.setText(info);
+            }
+
+            @Override
+            public void onError(String error) {
+                tvUserInfo.setText("用户信息：" + error);
+            }
+        });
+    }
+
+    private void saveUserProfile() {
+        String nickname = etUserNickname.getText().toString().trim();
+        String gender = etUserGender.getText().toString().trim();
+        String birthday = etUserBirthday.getText().toString().trim();
+        if (nickname.isEmpty()) {
+            toast("请输入昵称");
+            return;
+        }
+        tvUserInfo.setText("用户信息：保存中…");
+        serverBridge.updateUserProfile(nickname, gender.isEmpty() ? null : gender,
+                birthday.isEmpty() ? null : birthday, null,
+                new VoiceServerBridge.ProfileCallback() {
+                    @Override
+                    public void onUserProfile(PophieApiClient.UserProfileResult profile) {
+                        toast("用户信息已保存");
+                        String info = "用户：" + profile.userId + " 昵称：" + profile.nickname;
+                        if (profile.voiceEnrolled) info += " [声纹已录入]";
+                        tvUserInfo.setText(info);
+                    }
+
+                    @Override
+                    public void onError(String error) {
+                        tvUserInfo.setText("用户信息：保存失败 " + error);
+                        toast("保存失败：" + error);
+                    }
+                });
+    }
+
+    private void loadRobotConfig() {
+        tvRobotInfo.setText("机器人配置：加载中…");
+        serverBridge.fetchRobotConfig(new VoiceServerBridge.ProfileCallback() {
+            @Override
+            public void onRobotConfig(PophieApiClient.RobotConfigResult config) {
+                if (config.displayName != null && !config.displayName.isEmpty()) {
+                    etRobotName.setText(config.displayName);
+                }
+                if (config.persona != null) etRobotPersona.setText(config.persona);
+                if (config.greeting != null) etRobotGreeting.setText(config.greeting);
+                String info = "机器人：" + config.robotId;
+                if (config.displayName != null && !config.displayName.isEmpty()) {
+                    info += " 名称：" + config.displayName;
+                }
+                if (config.voiceId != null && !config.voiceId.isEmpty()) {
+                    info += " 音色：" + config.voiceId;
+                }
+                tvRobotInfo.setText(info);
+            }
+
+            @Override
+            public void onError(String error) {
+                tvRobotInfo.setText("机器人配置：" + error);
+            }
+        });
+    }
+
+    private void saveRobotConfig() {
+        String name = etRobotName.getText().toString().trim();
+        String persona = etRobotPersona.getText().toString().trim();
+        String greeting = etRobotGreeting.getText().toString().trim();
+        if (name.isEmpty()) {
+            toast("请输入机器人名称");
+            return;
+        }
+        tvRobotInfo.setText("机器人配置：保存中…");
+        serverBridge.updateRobotConfig(name, persona.isEmpty() ? null : persona,
+                null, null, greeting.isEmpty() ? null : greeting, null,
+                new VoiceServerBridge.ProfileCallback() {
+                    @Override
+                    public void onRobotConfig(PophieApiClient.RobotConfigResult config) {
+                        toast("机器人配置已保存");
+                        String info = "机器人：" + config.robotId + " 名称：" + config.displayName;
+                        tvRobotInfo.setText(info);
+                    }
+
+                    @Override
+                    public void onError(String error) {
+                        tvRobotInfo.setText("机器人配置：保存失败 " + error);
+                        toast("保存失败：" + error);
+                    }
+                });
     }
 
     private void testServerConnection() {
@@ -382,6 +581,24 @@ public class MainActivity extends AppCompatActivity {
                 .minSpeechMs(120)
                 .build();
         engine = new VoiceEngine(this, cfg);
+        serverBridge.setVoiceEngine(engine);
+        engine.setModelDownloadListener(new ModelDownloadListener() {
+            @Override
+            public void onDownloadStart(String fileName) {
+                ui.post(() -> status.setText("登记：下载模型 " + fileName + "…"));
+            }
+
+            @Override
+            public void onDownloadProgress(String fileName, long bytes) {
+                ui.post(() -> status.setText(String.format(java.util.Locale.ROOT,
+                        "登记：下载 %s %.1fMB…", fileName, bytes / (1024.0 * 1024.0))));
+            }
+
+            @Override
+            public void onDownloadDone(String fileName) {
+                ui.post(() -> status.setText("登记：模型就绪 " + fileName));
+            }
+        });
         VoiceListener serverListener = serverBridge.createVoiceListener();
         engine.setListener(new VoiceListener() {
             @Override
@@ -444,27 +661,36 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void enrollOwner() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED) {
-            toast("缺少录音权限");
-            return;
-        }
         if (enrolling) return;
+        runWithRecordAudio(PendingAudioAction.ENROLL, this::doEnrollOwner);
+    }
+
+    private void doEnrollOwner() {
         enrolling = true;
         enrollHint.setText("请连续说约 8 秒（几句话，可把下面这句读两遍）：\n「" + ENROLL_TEXT + "」");
-        status.setText("登记：准备录音，请连续说话…");
-        toast("请连续说约 8 秒，准备录音");
+        status.setText("登记：准备中…");
+        toast("首次需下载声纹模型，请稍候");
         new Thread(() -> {
             try {
                 engine.stop();
                 serverBridge.disconnect();
-                Thread.sleep(800);
-                ui.post(() -> status.setText("登记录音中(8s)…请连续说话"));
-                double thr = engine.enrollOwnerFromMic(8000);
+                Thread.sleep(300);
+                ui.post(() -> status.setText("登记：检查/加载声纹模型…"));
+                engine.ensureScorer();
                 ui.post(() -> {
-                    toast(String.format(java.util.Locale.ROOT, "登记完成，自动阈值=%.3f", thr));
+                    status.setText("登记录音中(8s)…请连续说话");
+                    toast("开始录音，请连续说话");
+                });
+                short[] pcm = engine.captureMicMilliseconds(8000);
+                double thr = engine.enrollOwnerFromPcm(pcm);
+                ui.post(() -> {
+                    boolean as = engine.asnormActive();
+                    String kind = as ? "AS-Norm" : "cosine";
+                    toast(String.format(java.util.Locale.ROOT, "登记完成 %s 阈值=%.3f", kind, thr));
                     status.setText("状态：已登记主人，可点【开始】");
-                    enrollHint.setText("✓ 已登记主人。自动阈值=" + String.format(java.util.Locale.ROOT, "%.3f", thr)
+                    enrollHint.setText("✓ 已登记主人。标定=" + kind + " 阈值="
+                            + String.format(java.util.Locale.ROOT, "%.3f", thr)
+                            + (as ? "" : "（录 ≥3 人 cohort 可升级 AS-Norm）")
                             + "\n登记用语：「" + ENROLL_TEXT + "」");
                     verifyResult.setText("自检：—（可点【自检相似度】验证）");
                     refreshCohortInfo();
@@ -482,11 +708,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void verifyOwner() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED) {
-            toast("缺少录音权限");
-            return;
-        }
+        runWithRecordAudio(PendingAudioAction.VERIFY, this::doVerifyOwner);
+    }
+
+    private void doVerifyOwner() {
         if (enrolling) { toast("正在登记，请稍候"); return; }
         status.setText("自检：录音 2.5s，请正常说一句话…");
         toast("请正常说一句话(2.5s)");
@@ -516,11 +741,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void addCohort() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO)
-                != PackageManager.PERMISSION_GRANTED) {
-            toast("缺少录音权限");
-            return;
-        }
+        runWithRecordAudio(PendingAudioAction.COHORT, this::doAddCohort);
+    }
+
+    private void doAddCohort() {
         if (enrolling) { toast("正在登记，请稍候"); return; }
         status.setText("录入背景人声：录音 2.5s，请让【其他人】说一句…");
         toast("请让其他人说一句(2.5s)");
@@ -548,8 +772,9 @@ public class MainActivity extends AppCompatActivity {
             boolean owner = engine.isOwnerEnrolled();
             String extra;
             if (as) extra = "（AS-Norm 已生效）";
-            else if (n >= 8 && owner) extra = "（cohort 足够，请【重新登记主人】以启用 AS-Norm）";
-            else extra = "（需 ≥8 个不同人，且在录完 cohort 后登记主人才生效）";
+            else if (n >= 3 && owner) extra = "（可【重新登记主人】启用 AS-Norm；录满 ≥8 人更准）";
+            else if (n >= 3) extra = "（cohort≥3，登记主人将用 AS-Norm；推荐录满 ≥8 人）";
+            else extra = "（无 cohort 时用 cosine 自标定；录 ≥3 个其他人可升级 AS-Norm）";
             ui.post(() -> cohortInfo.setText("cohort：" + n + extra));
         }).start();
     }
@@ -561,7 +786,10 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        if (engine != null) engine.stop();
-        if (serverBridge != null) serverBridge.disconnect();
+        if (serverBridge != null) {
+            serverBridge.disconnect();
+            serverBridge.shutdown();
+        }
+        if (engine != null) engine.release();
     }
 }

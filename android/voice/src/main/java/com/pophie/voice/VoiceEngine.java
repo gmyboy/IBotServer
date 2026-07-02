@@ -11,6 +11,7 @@ import android.util.Log;
 import com.pophie.voice.dsp.Denoiser;
 import com.pophie.voice.dsp.HighPassFilter;
 import com.pophie.voice.dsp.NoOpDenoiser;
+import com.pophie.voice.model.ModelDownloadListener;
 import com.pophie.voice.model.ModelManager;
 import com.pophie.voice.source.AudioSource;
 import com.pophie.voice.source.ExternalPcmSource;
@@ -41,15 +42,20 @@ public final class VoiceEngine {
     private volatile VoiceListener listener;
 
     private volatile boolean running = false;
+    private volatile boolean muted = false;
     private AudioSource source;
     private SileroVad vad;
-    private SpeakerScorer scorer;
+    private volatile SpeakerScorer scorer;
+    private final Object scorerInitLock = new Object();
+    private volatile boolean scorerInitInProgress;
+    private volatile ModelDownloadListener modelDownloadListener;
     private Endpointer endpointer;
     private Denoiser denoiser;
     private HighPassFilter highPass;
 
     private LinkedBlockingQueue<short[]> queue;
     private Thread procThread;
+    private volatile Thread initThread;
 
     private final int frameSamples;
     private final int frameMs;
@@ -73,12 +79,18 @@ public final class VoiceEngine {
 
     public void setListener(VoiceListener l) { this.listener = l; }
 
+    /** 模型下载进度（后台线程回调）。 */
+    public void setModelDownloadListener(ModelDownloadListener l) {
+        this.modelDownloadListener = l;
+    }
+
     // ---------------- 生命周期 ----------------
 
     public synchronized void start() {
         if (running) return;
         running = true;
-        new Thread(this::init, "pophie-voice-init").start();
+        initThread = new Thread(this::init, "pophie-voice-init");
+        initThread.start();
     }
 
     private void init() {
@@ -112,44 +124,84 @@ public final class VoiceEngine {
             Log.e(TAG, "init failed", t);
             fail(new VoiceError(VoiceError.Code.MODEL_LOAD_FAILED, "初始化失败: " + t.getMessage(), t));
             running = false;
+        } finally {
+            initThread = null;
         }
     }
 
     /** 构建 VAD/声纹/端点等（声纹可被 enroll 提前构建）。 */
-    private synchronized void ensureEngineComponents() throws Exception {
+    private void ensureEngineComponents() throws Exception {
         if (vad == null) {
             ModelManager mm = new ModelManager(context, config);
+            mm.setDownloadListener(modelDownloadListener);
             String vadPath = mm.vadPath();
             AssetManager am = config.useAssets ? context.getAssets() : null;
-            vad = new SileroVad(vadPath, am, config.vadThreshold, config.sampleRate,
-                    config.vadWindowSize, config.numThreads);
+            synchronized (this) {
+                if (vad == null) {
+                    vad = new SileroVad(vadPath, am, config.vadThreshold, config.sampleRate,
+                            config.vadWindowSize, config.numThreads);
+                }
+            }
         }
         ensureScorer();
-        if (endpointer == null) {
-            endpointer = new Endpointer(config.vadThreshold, config.minSpeechMs,
-                    config.maxSilenceMs, config.maxSegmentMs, config.frameMs);
+        synchronized (this) {
+            if (endpointer == null) {
+                endpointer = new Endpointer(config.vadThreshold, config.minSpeechMs,
+                        config.maxSilenceMs, config.maxSegmentMs, config.frameMs);
+            }
+            if (denoiser == null) denoiser = new NoOpDenoiser();
+            if (highPass == null) highPass = new HighPassFilter();
         }
-        if (denoiser == null) denoiser = new NoOpDenoiser();
-        if (highPass == null) highPass = new HighPassFilter();
     }
 
-    /** 仅构建声纹（供 enroll 在未 start 时使用；会按需下载模型，请在后台线程调用）。 */
-    public synchronized void ensureScorer() throws Exception {
+    /**
+     * 仅构建声纹（供 enroll 在未 start 时使用；会按需下载模型，请在后台线程调用）。
+     * 下载在锁外进行，避免阻塞 stop() / 登记录音。
+     */
+    public void ensureScorer() throws Exception {
         if (scorer != null) return;
-        ModelManager mm = new ModelManager(context, config);
-        String spkPath = mm.speakerPath();
-        AssetManager am = config.useAssets ? context.getAssets() : null;
-        File storeDir = config.modelDir != null ? new File(config.modelDir)
-                : new File(context.getFilesDir(), "pophie-voice");
-        scorer = new SpeakerScorer(spkPath, am, config.numThreads, config.sampleRate,
-                config.ownerThreshold, config.emaAlpha, storeDir);
+        synchronized (scorerInitLock) {
+            if (scorer != null) return;
+            while (scorerInitInProgress) {
+                scorerInitLock.wait(300);
+                if (scorer != null) return;
+            }
+            scorerInitInProgress = true;
+        }
+        try {
+            ModelManager mm = new ModelManager(context, config);
+            mm.setDownloadListener(modelDownloadListener);
+            String spkPath = mm.speakerPath();
+            AssetManager am = config.useAssets ? context.getAssets() : null;
+            File storeDir = config.modelDir != null ? new File(config.modelDir)
+                    : new File(context.getFilesDir(), "pophie-voice");
+            SpeakerScorer created = new SpeakerScorer(spkPath, am, config.numThreads, config.sampleRate,
+                    config.ownerThreshold, config.emaAlpha, storeDir);
+            synchronized (scorerInitLock) {
+                if (scorer == null) scorer = created;
+            }
+        } finally {
+            synchronized (scorerInitLock) {
+                scorerInitInProgress = false;
+                scorerInitLock.notifyAll();
+            }
+        }
+    }
+
+    private SpeakerScorer requireScorer() throws Exception {
+        ensureScorer();
+        SpeakerScorer s = scorer;
+        if (s == null) throw new IllegalStateException("声纹模型未就绪");
+        return s;
     }
 
     private void warmup() {
         try {
+            SpeakerScorer s = scorer;
+            if (vad == null || s == null) return;
             float[] z = new float[config.vadWindowSize];
             vad.prob(z);
-            scorer.embed(new short[config.sampleRate / 2]);
+            s.embed(new short[config.sampleRate / 2]);
         } catch (Throwable t) {
             Log.w(TAG, "warmup skipped: " + t.getMessage());
         }
@@ -157,17 +209,53 @@ public final class VoiceEngine {
 
     public synchronized void stop() {
         running = false;
+        muted = false;
+        Thread init = initThread;
+        if (init != null) {
+            try { init.join(3000); } catch (InterruptedException ignored) {}
+            initThread = null;
+        }
         if (source != null) { try { source.stop(); } catch (Throwable ignored) {} source = null; }
         if (procThread != null) { procThread.interrupt(); procThread = null; }
         if (queue != null) queue.clear();
         if (vad != null) vad.reset();
+        if (highPass != null) highPass.reset();
         preOut.clear();
         preAna.clear();
         seg = null;
         prevSpeaking = false;
     }
 
+    /**
+     * 释放全部原生资源（sherpa-onnx VAD/声纹模型）。
+     * 调用后引擎不可再用；如需重启请新建 VoiceEngine。
+     */
+    public synchronized void release() {
+        stop();
+        if (vad != null) { try { vad.release(); } catch (Throwable ignored) {} vad = null; }
+        if (scorer != null) { try { scorer.release(); } catch (Throwable ignored) {} scorer = null; }
+        if (highPass != null) { highPass.reset(); highPass = null; }
+        endpointer = null;
+        denoiser = null;
+    }
+
     public boolean isRunning() { return running; }
+
+    /**
+     * 静音/恢复处理（用于 TTS 播放时抑制自激）。
+     * 静音时强制结束当前段并停止 VAD/声纹/输出，防止麦克风采集到自身 TTS 回放。
+     */
+    public void setMuted(boolean muted) {
+        this.muted = muted;
+        if (muted && seg != null) {
+            endSegment();
+        }
+        if (muted) {
+            prevSpeaking = false;
+        }
+    }
+
+    public boolean isMuted() { return muted; }
 
     /** EXTERNAL_PCM 模式：上层喂入 PCM16。 */
     public void pushPcm(short[] pcm) {
@@ -178,72 +266,75 @@ public final class VoiceEngine {
     // ---------------- 登记 ----------------
 
     /** 登记主人（多段）。需在后台线程调用（可能下载模型）。 */
-    public synchronized void enrollOwner(List<short[]> samples) throws Exception {
-        ensureScorer();
-        scorer.enroll(OWNER_NAME, samples, true);
+    public void enrollOwner(List<short[]> samples) throws Exception {
+        requireScorer().enroll(OWNER_NAME, samples, true);
     }
 
-    public synchronized void enroll(String name, List<short[]> samples) throws Exception {
-        ensureScorer();
-        scorer.enroll(name, samples, false);
+    public void enroll(String name, List<short[]> samples) throws Exception {
+        requireScorer().enroll(name, samples, false);
     }
 
     /**
-     * 用与运行时完全相同的采集路径(同 MicSource + 同 NS/AEC/AGC)登记主人，
-     * 避免登记/识别前处理不一致导致的低匹配率。请在后台线程调用；调用前应先 stop()。
-     * @return 实际采集的样本数
+     * 用与运行时完全相同的采集路径登记主人。请在后台线程调用；调用前应先 stop()。
+     * @return 自动标定阈值
      */
-    public synchronized double enrollOwnerFromMic(int ms) throws Exception {
+    public double enrollOwnerFromMic(int ms) throws Exception {
         ensureScorer();
-        short[] pcm = captureMs(ms);
-        return scorer.enrollOwnerAuto(OWNER_NAME, pcm); // 自动标定阈值，返回阈值
+        return enrollOwnerFromPcm(captureMs(ms));
+    }
+
+    /** 仅采集麦克风（与登记/运行时同一路径）。后台线程调用。 */
+    public short[] captureMicMilliseconds(int ms) throws Exception {
+        return captureMs(ms);
+    }
+
+    /** 用已采集 PCM 登记主人（需先 ensureScorer）。 */
+    public double enrollOwnerFromPcm(short[] pcm) throws Exception {
+        return requireScorer().enrollOwnerAuto(OWNER_NAME, pcm);
     }
 
     /** 当前生效的主人阈值（自动标定值或默认值）。 */
-    public synchronized float ownerThreshold() {
-        try { ensureScorer(); } catch (Exception e) { return 0f; }
-        return scorer.currentOwnerThreshold();
+    public float ownerThreshold() {
+        try { return requireScorer().currentOwnerThreshold(); } catch (Exception e) { return 0f; }
     }
 
     /** 手动设置裸 cosine 阈值（无 cohort 路径用）；可据自检数值微调。 */
-    public synchronized void setOwnerThreshold(float t) {
-        try { ensureScorer(); scorer.setOwnerThreshold(t); } catch (Exception ignored) {}
+    public void setOwnerThreshold(float t) {
+        try { requireScorer().setOwnerThreshold(t); } catch (Exception ignored) {}
     }
 
-    /** 自检：录一段返回自检分数（AS-Norm 启用时为归一化分，否则裸 cosine；无主人 NaN）。后台线程调用。 */
-    public synchronized float verifyOwnerFromMic(int ms) throws Exception {
+    /** 自检：录一段返回自检分数。后台线程调用。 */
+    public float verifyOwnerFromMic(int ms) throws Exception {
         ensureScorer();
         short[] pcm = captureMs(ms);
-        return scorer.ownerSelfScore(pcm);
+        return requireScorer().ownerSelfScore(pcm);
     }
 
     /** 自检分数对应的判定阈值（与 verifyOwnerFromMic 同量纲）。 */
-    public synchronized float ownerSelfThreshold() {
-        try { ensureScorer(); } catch (Exception e) { return 0f; }
-        return scorer.ownerSelfThreshold();
+    public float ownerSelfThreshold() {
+        try { return requireScorer().ownerSelfThreshold(); } catch (Exception e) { return 0f; }
     }
 
     /** AS-Norm 是否已生效（cohort 足够且已标定）。 */
-    public synchronized boolean asnormActive() {
-        try { ensureScorer(); } catch (Exception e) { return false; }
-        return scorer.asnormActive();
+    public boolean asnormActive() {
+        try { return requireScorer().asnormActive(); } catch (Exception e) { return false; }
     }
 
     /** 录入一条背景人声 cohort 样本（其他人）。后台线程调用。 */
-    public synchronized int addCohortFromMic(int ms) throws Exception {
+    public int addCohortFromMic(int ms) throws Exception {
         ensureScorer();
         short[] pcm = captureMs(ms);
-        scorer.addCohort(pcm);
-        return scorer.cohortSize();
+        SpeakerScorer s = requireScorer();
+        s.addCohort(pcm);
+        return s.cohortSize();
     }
 
-    public synchronized int cohortSize() {
-        try { ensureScorer(); } catch (Exception e) { return 0; }
-        return scorer.cohortSize();
+    public int cohortSize() {
+        try { return requireScorer().cohortSize(); } catch (Exception e) { return 0; }
     }
 
-    public synchronized void clearCohort() {
-        try { ensureScorer(); scorer.clearCohort(); } catch (Exception ignored) {}
+    public void clearCohort() {
+        try { requireScorer().clearCohort(); } catch (Exception ignored) {}
     }
 
     /** 用 MicSource(与运行时一致)同步采集 ms 毫秒音频。 */
@@ -272,17 +363,19 @@ public final class VoiceEngine {
         return WavUtil.concat(frames);
     }
 
-    public synchronized boolean isOwnerEnrolled() {
-        try { ensureScorer(); } catch (Exception e) { return false; }
-        return scorer.isOwnerEnrolled();
+    public boolean isOwnerEnrolled() {
+        try { return requireScorer().isOwnerEnrolled(); } catch (Exception e) { return false; }
     }
 
-    public synchronized void clearSpeakers() {
-        try { ensureScorer(); scorer.clear(); } catch (Exception ignored) {}
+    public void clearSpeakers() {
+        SpeakerScorer s = scorer;
+        if (s != null) {
+            try { s.clear(); } catch (Exception ignored) {}
+        }
     }
 
-    public synchronized String[] listSpeakers() {
-        try { ensureScorer(); return scorer.speakerNames(); } catch (Exception e) { return new String[0]; }
+    public String[] listSpeakers() {
+        try { return requireScorer().speakerNames(); } catch (Exception e) { return new String[0]; }
     }
 
     // ---------------- 处理 ----------------
@@ -313,6 +406,7 @@ public final class VoiceEngine {
     }
 
     private void process(short[] frame) {
+        if (muted) return;  // TTS 播放中：跳过全部处理，防止自激
         short[] outFrame = denoiser.process(frame);          // 输出路（系统已降噪）
         short[] anaFrame = highPass.process(frame);          // 分析路（轻处理）
         float prob = vad.prob(WavUtil.pcm16ToFloat(anaFrame));

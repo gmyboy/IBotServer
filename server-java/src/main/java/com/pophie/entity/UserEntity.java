@@ -25,6 +25,31 @@ public class UserEntity {
     @Column(name = "display_name")
     private String displayName;
 
+    @Column(name = "nickname")
+    private String nickname;
+
+    @Column(name = "gender")
+    private String gender;
+
+    @Column(name = "birthday")
+    private String birthday;
+
+    @Column(name = "avatar_url")
+    private String avatarUrl;
+
+    /** 主人声纹录入原始音频（base64 WAV），用于服务端备份/重新提取。 */
+    @Column(name = "voice_data", columnDefinition = "LONGTEXT")
+    private String voiceData;
+
+    @Column(name = "voice_data_format")
+    private String voiceDataFormat;
+
+    @Column(name = "voice_data_sample_rate")
+    private Integer voiceDataSampleRate;
+
+    @Column(name = "voice_enrolled")
+    private Boolean voiceEnrolled;
+
     @Column(name = "created_at")
     private String createdAt;
 

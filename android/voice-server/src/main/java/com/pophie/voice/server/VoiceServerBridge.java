@@ -4,6 +4,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import com.pophie.voice.GateMode;
+import com.pophie.voice.VoiceEngine;
 import com.pophie.voice.VoiceListener;
 import com.pophie.voice.VoiceSegment;
 import com.pophie.voice.WavUtil;
@@ -48,10 +49,19 @@ public final class VoiceServerBridge {
     private final ReplyNotifyClient replyNotify = new ReplyNotifyClient();
     /** 串行 chat/stream，避免多段并行时 reply 事件交错。 */
     private final ExecutorService chatExecutor = Executors.newSingleThreadExecutor();
+    /** 串行段日志上传 + STT patch，避免每段创建线程。 */
+    private final ExecutorService logExecutor = Executors.newSingleThreadExecutor();
     /** 串行测试推送，避免连点重叠。 */
     private final ExecutorService notifyTestExecutor = Executors.newSingleThreadExecutor();
     private final AtomicInteger pendingTestPushes = new AtomicInteger(0);
     private static final int MAX_PENDING_TEST_PUSHES = 3;
+
+    /** sessionId 创建锁（双重检查，避免并发 newSession）。 */
+    private final Object sessionLock = new Object();
+    /** VoiceEngine 弱引用，用于 TTS 播放时静音采集。 */
+    private volatile VoiceEngine engineRef;
+    /** 正在播放的 TTS 段计数，归零时才解除静音。 */
+    private final AtomicInteger playbackCount = new AtomicInteger(0);
 
     public VoiceServerBridge(VoiceServerConfig config) {
         this.config = config;
@@ -61,6 +71,9 @@ public final class VoiceServerBridge {
         replyPlayer.setListener(new ReplyAudioPlayer.Listener() {
             @Override
             public void onPlayStart(int seq, String text) {
+                playbackCount.incrementAndGet();
+                VoiceEngine e = engineRef;
+                if (e != null) e.setMuted(true);
                 main.post(() -> {
                     VoiceServerListener l = listener;
                     if (l != null) l.onReplyPlayStart(seq);
@@ -69,6 +82,10 @@ public final class VoiceServerBridge {
 
             @Override
             public void onPlayEnd(int seq) {
+                if (playbackCount.decrementAndGet() <= 0) {
+                    VoiceEngine e = engineRef;
+                    if (e != null) e.setMuted(false);
+                }
                 main.post(() -> {
                     VoiceServerListener l = listener;
                     if (l != null) l.onReplyPlayEnd(seq);
@@ -113,6 +130,36 @@ public final class VoiceServerBridge {
         gateMode = mode == null ? GateMode.REPORT : mode;
     }
 
+    /**
+     * 绑定 VoiceEngine，用于 TTS 播放时自动静音采集（抑制自激）。
+     * 在 engine.start() 之前调用。
+     */
+    public void setVoiceEngine(VoiceEngine engine) {
+        this.engineRef = engine;
+    }
+
+    /**
+     * 确保 sessionId 存在（双重检查锁，避免并发创建多个会话）。
+     * 网络调用在锁内，但仅在首次（sessionId 为空时）触发。
+     */
+    private String ensureSession() throws IOException {
+        if (!sessionId.isEmpty()) return sessionId;
+        synchronized (sessionLock) {
+            if (!sessionId.isEmpty()) return sessionId;
+            PophieApiClient.SessionInfo session = api.newSession();
+            sessionId = session.sessionId;
+            return sessionId;
+        }
+    }
+
+    /** 释放全部资源（线程池、WebSocket、播放器）。调用后不可再用。 */
+    public void shutdown() {
+        disconnect();
+        chatExecutor.shutdownNow();
+        logExecutor.shutdownNow();
+        notifyTestExecutor.shutdownNow();
+    }
+
     /** 建立实时 STT WebSocket；若开启则同时订阅回复通知。 */
     public void connectRealtime() {
         if (!realtimeEnabled) return;
@@ -147,12 +194,12 @@ public final class VoiceServerBridge {
                     if (patchId > 0) {
                         pendingSttPatchLogId = 0;
                         final String finalText = text;
-                        new Thread(() -> {
+                        logExecutor.execute(() -> {
                             try {
                                 api.patchVoiceSegmentStt(patchId, finalText);
                             } catch (Exception ignored) {
                             }
-                        }).start();
+                        });
                     }
                 }
                 main.post(() -> {
@@ -180,6 +227,9 @@ public final class VoiceServerBridge {
         realtimeStt.close();
         replyNotify.close();
         replyPlayer.reset();
+        playbackCount.set(0);
+        VoiceEngine e = engineRef;
+        if (e != null) e.setMuted(false);
         utteranceOpen = false;
         sttStrongFrames = 0;
         pendingSttPartial = "";
@@ -219,6 +269,79 @@ public final class VoiceServerBridge {
 
     public String getBoundRobotId() {
         return api.getRobotId();
+    }
+
+    public void fetchUserProfile(ProfileCallback callback) {
+        String uid = api.getUserId();
+        if (uid == null || uid.isEmpty() || "demo".equals(uid)) {
+            main.post(() -> callback.onError("请先绑定设备"));
+            return;
+        }
+        new Thread(() -> {
+            try {
+                PophieApiClient.UserProfileResult result = api.getUserProfile(uid);
+                main.post(() -> callback.onUserProfile(result));
+            } catch (Exception e) {
+                main.post(() -> callback.onError(e.getMessage()));
+            }
+        }).start();
+    }
+
+    public void updateUserProfile(String nickname, String gender, String birthday, String avatarUrl,
+                                   ProfileCallback callback) {
+        String uid = api.getUserId();
+        if (uid == null || uid.isEmpty() || "demo".equals(uid)) {
+            main.post(() -> callback.onError("请先绑定设备"));
+            return;
+        }
+        new Thread(() -> {
+            try {
+                PophieApiClient.UserProfileResult result = api.updateUserProfile(uid, nickname, gender, birthday, avatarUrl);
+                main.post(() -> callback.onUserProfile(result));
+            } catch (Exception e) {
+                main.post(() -> callback.onError(e.getMessage()));
+            }
+        }).start();
+    }
+
+    public void fetchRobotConfig(ProfileCallback callback) {
+        String rid = api.getRobotId();
+        if (rid == null || rid.isEmpty() || "default".equals(rid)) {
+            main.post(() -> callback.onError("请先绑定设备"));
+            return;
+        }
+        new Thread(() -> {
+            try {
+                PophieApiClient.RobotConfigResult result = api.getRobotConfig(rid);
+                main.post(() -> callback.onRobotConfig(result));
+            } catch (Exception e) {
+                main.post(() -> callback.onError(e.getMessage()));
+            }
+        }).start();
+    }
+
+    public void updateRobotConfig(String displayName, String persona, String voiceId, String voiceStyle,
+                                   String greeting, String avatarUrl, ProfileCallback callback) {
+        String rid = api.getRobotId();
+        if (rid == null || rid.isEmpty() || "default".equals(rid)) {
+            main.post(() -> callback.onError("请先绑定设备"));
+            return;
+        }
+        new Thread(() -> {
+            try {
+                PophieApiClient.RobotConfigResult result = api.updateRobotConfig(rid, displayName, persona,
+                        voiceId, voiceStyle, greeting, avatarUrl);
+                main.post(() -> callback.onRobotConfig(result));
+            } catch (Exception e) {
+                main.post(() -> callback.onError(e.getMessage()));
+            }
+        }).start();
+    }
+
+    public interface ProfileCallback {
+        default void onUserProfile(PophieApiClient.UserProfileResult profile) {}
+        default void onRobotConfig(PophieApiClient.RobotConfigResult config) {}
+        void onError(String error);
     }
 
     /** 后台线程：健康检查 + 新建会话。 */
@@ -311,15 +434,12 @@ public final class VoiceServerBridge {
         if (seg.durationMs < config.minLogSegmentMs) return;
         final boolean isOwner = seg.speaker != null && seg.speaker.isOwner;
         final String gate = gateMode.name();
-        new Thread(() -> {
+        logExecutor.execute(() -> {
             try {
                 String sttText = resolveSttTextForUpload();
-                if (sessionId.isEmpty()) {
-                    PophieApiClient.SessionInfo session = api.newSession();
-                    sessionId = session.sessionId;
-                }
+                String sid = ensureSession();
                 PophieApiClient.SegmentLogResult result = api.uploadVoiceSegment(
-                        sessionId, seg, sttText, config, gate);
+                        sid, seg, sttText, config, gate);
                 sessionId = result.sessionId;
                 String loggedStt = (result.sttText != null && !result.sttText.isEmpty())
                         ? result.sttText : sttText;
@@ -339,7 +459,7 @@ public final class VoiceServerBridge {
                     if (l != null) l.onSegmentLogError(e.getMessage());
                 });
             }
-        }).start();
+        });
     }
 
     /**
@@ -500,12 +620,9 @@ public final class VoiceServerBridge {
         final StringBuilder streamReply = new StringBuilder();
         chatExecutor.execute(() -> {
             try {
-                if (sessionId.isEmpty()) {
-                    PophieApiClient.SessionInfo session = api.newSession();
-                    sessionId = session.sessionId;
-                }
+                String sid = ensureSession();
                 PophieApiClient.ChatStreamResult result = api.chatStream(
-                        sessionId, wav, seg.sampleRate,
+                        sid, wav, seg.sampleRate,
                         createChatStreamHandler(streamReply), config);
                 sessionId = result.sessionId;
                 String replyLine = result.replyText.isEmpty() ? "" : result.replyText;
