@@ -136,6 +136,57 @@ public class UserService {
         return out;
     }
 
+    public List<Map<String, Object>> listUsersWithStats(String q) {
+        List<UserEntity> users;
+        if (q != null && !q.trim().isEmpty()) {
+            String like = "%" + q.trim() + "%";
+            users = userRepo.findAll();
+        java.util.List<UserEntity> filtered = new ArrayList<>();
+        for (UserEntity u : users) {
+            boolean match = false;
+            if (u.getNickname() != null && u.getNickname().contains(q.trim())) match = true;
+            if (u.getUserId() != null && u.getUserId().contains(q.trim())) match = true;
+            if (match) filtered.add(u);
+        }
+        users = filtered;
+        } else {
+            users = userRepo.findAll(org.springframework.data.domain.Sort.by(org.springframework.data.domain.Sort.Direction.DESC, "createdAt"));
+        }
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (UserEntity u : users) {
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("user_id", u.getUserId());
+            m.put("display_name", u.getDisplayName());
+            m.put("nickname", u.getNickname());
+            m.put("gender", u.getGender());
+            m.put("avatar_url", u.getAvatarUrl());
+            m.put("voice_enrolled", Boolean.TRUE.equals(u.getVoiceEnrolled()));
+            m.put("created_at", u.getCreatedAt());
+            m.put("last_seen_at", u.getUpdatedAt());
+            m.put("devices_count", deviceRepo.countByUserId(u.getUserId()));
+            out.add(m);
+        }
+        return out;
+    }
+
+    public Map<String, Object> getUserDetail(String userId) {
+        UserEntity u = requireUser(userId);
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("user_id", u.getUserId());
+        m.put("display_name", u.getDisplayName());
+        m.put("nickname", u.getNickname());
+        m.put("gender", u.getGender());
+        m.put("birthday", u.getBirthday());
+        m.put("avatar_url", u.getAvatarUrl());
+        m.put("voice_enrolled", Boolean.TRUE.equals(u.getVoiceEnrolled()));
+        m.put("voice_data_format", u.getVoiceDataFormat());
+        m.put("voice_data_sample_rate", u.getVoiceDataSampleRate());
+        m.put("created_at", u.getCreatedAt());
+        m.put("updated_at", u.getUpdatedAt());
+        m.put("devices", listBoundRobots(userId));
+        return m;
+    }
+
     private UserEntity requireUser(String userId) {
         return userRepo.findById(userId)
                 .orElseThrow(() -> new ApiException(404, "用户不存在: " + userId));

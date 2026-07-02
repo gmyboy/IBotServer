@@ -6,6 +6,7 @@ import com.pophie.exception.ApiException;
 import com.pophie.repository.ConversationRepository;
 import com.pophie.repository.MemoryRepository;
 import com.pophie.repository.ProactiveLogRepository;
+import com.pophie.repository.UserRepository;
 import com.pophie.repository.VoiceSegmentLogRepository;
 import com.pophie.repository.ReminderRepository;
 import com.pophie.schema.AdminModels;
@@ -13,6 +14,7 @@ import com.pophie.service.ChatService;
 import com.pophie.service.MemoryService;
 import com.pophie.service.SpeechService;
 import com.pophie.service.RobotService;
+import com.pophie.service.UserService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -52,12 +54,15 @@ public class AdminController {
     private final ReminderRepository reminderRepo;
     private final ProactiveLogRepository proactiveLogRepo;
     private final VoiceSegmentLogRepository voiceSegmentLogRepo;
+    private final UserRepository userRepo;
+    private final UserService userService;
 
     public AdminController(RuntimeConfigService cfg, RobotService robotService, MemoryService memory,
                            SpeechService speech, ChatService chatService, MemoryRepository memoryRepo,
                            ConversationRepository conversationRepo, ReminderRepository reminderRepo,
                            ProactiveLogRepository proactiveLogRepo,
-                           VoiceSegmentLogRepository voiceSegmentLogRepo) {
+                           VoiceSegmentLogRepository voiceSegmentLogRepo,
+                           UserRepository userRepo, UserService userService) {
         this.cfg = cfg;
         this.robotService = robotService;
         this.memory = memory;
@@ -68,6 +73,8 @@ public class AdminController {
         this.reminderRepo = reminderRepo;
         this.proactiveLogRepo = proactiveLogRepo;
         this.voiceSegmentLogRepo = voiceSegmentLogRepo;
+        this.userRepo = userRepo;
+        this.userService = userService;
     }
 
     private String adminToken() {
@@ -122,6 +129,18 @@ public class AdminController {
         m.put("robot_id", robotId);
         m.put("deleted", deleted);
         return m;
+    }
+
+    @GetMapping("/users")
+    public Map<String, Object> usersList(@RequestParam(required = false) String q) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("items", userService.listUsersWithStats(q));
+        return out;
+    }
+
+    @GetMapping("/users/{userId}")
+    public Map<String, Object> userDetail(@PathVariable String userId) {
+        return userService.getUserDetail(userId);
     }
 
     @DeleteMapping("/memories/{memId}")

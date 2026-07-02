@@ -11,4 +11,6 @@ public interface DeviceRepository extends JpaRepository<DeviceEntity, String> {
     List<DeviceEntity> findByUserIdOrderByBoundAtAsc(String userId);
 
     Optional<DeviceEntity> findByRobotId(String robotId);
+
+    long countByUserId(String userId);
 }

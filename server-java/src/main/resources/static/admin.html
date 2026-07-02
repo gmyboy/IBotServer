@@ -117,6 +117,37 @@
   .cfg-field .hint{font-size:10px;color:#7782a8}
   .config-actions{display:flex;gap:8px;margin-bottom:14px;align-items:center;flex-wrap:wrap}
   .config-note{font-size:12px;color:var(--muted)}
+  /* API Doc styles */
+  .apidoc-section{margin-bottom:18px}
+  .apidoc-section h3{margin:0 0 10px;font-size:14px;color:var(--accent)}
+  .api-item{background:var(--panel);border:1px solid #2a2f4a;border-radius:8px;
+            padding:12px 14px;margin-bottom:8px}
+  .api-item .method{display:inline-block;padding:2px 8px;border-radius:4px;font-size:11px;
+            font-weight:700;margin-right:8px;color:#0b0e1a}
+  .api-item .method.get{background:var(--l2)}
+  .api-item .method.post{background:var(--l3)}
+  .api-item .method.put{background:var(--accent)}
+  .api-item .method.delete{background:var(--l4)}
+  .api-item .method.patch{background:#b48cff}
+  .api-item .path{font-family:monospace;font-size:13px}
+  .api-item .desc{margin-top:6px;font-size:12px;color:var(--muted);line-height:1.5}
+  .api-item code{background:var(--panel2);padding:1px 5px;border-radius:3px;font-size:11px}
+  .api-item pre{background:var(--panel2);padding:8px 10px;border-radius:6px;margin:6px 0;
+            font-size:11px;overflow-x:auto;color:#c0c8e8}
+  .api-group{font-size:12px;color:var(--muted);margin:16px 0 8px;
+            text-transform:uppercase;letter-spacing:.08em;border-bottom:1px solid #2a2f4a;padding-bottom:4px}
+  /* User list styles */
+  .user-item{padding:10px 12px;border-radius:8px;cursor:pointer;margin-bottom:4px;
+             border:1px solid transparent}
+  .user-item:hover{background:var(--panel2)}
+  .user-item.active{background:var(--panel2);border-color:var(--accent)}
+  .user-item .uid{font-size:13px;font-weight:600;word-break:break-all}
+  .user-item .sub{font-size:11px;color:var(--muted);margin-top:4px}
+  .user-detail{padding:14px 18px}
+  .user-detail .row{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px}
+  .user-detail .field{display:flex;flex-direction:column;gap:3px;min-width:140px}
+  .user-detail .field label{font-size:11px;color:var(--muted)}
+  .user-detail .field span{font-size:13px}
 </style>
 </head>
 <body>
@@ -140,7 +171,9 @@
   <aside class="sidebar">
     <div class="sidebar-nav">
       <button type="button" class="active" data-mode="robots">机器人</button>
+      <button type="button" data-mode="users">用户</button>
       <button type="button" data-mode="config">系统配置</button>
+      <button type="button" data-mode="apidoc">API文档</button>
     </div>
     <div id="robot-sidebar">
       <div class="search">
@@ -180,6 +213,23 @@
       <p class="config-note">修改 LLM / 记忆 / 聊天 / 语音参数后立即生效；修改 host / port 需重启服务。</p>
     </div>
     <div id="config-status-bar" class="config-note" style="padding:6px 12px;border-top:1px solid #2a2f4a"></div>
+  </main>
+  <main class="main" id="users-main" style="display:none">
+    <div class="detail-header">
+      <div class="row"><span class="rid">用户列表</span></div>
+      <div class="row">
+        <input type="text" id="user-search" placeholder="搜索 user_id / 昵称…" />
+        <button type="button" class="btn-ghost" id="btn-refresh-users">刷新</button>
+      </div>
+    </div>
+    <div style="display:flex;flex:1;min-height:0;overflow:hidden">
+      <div style="width:260px;border-right:1px solid #2a2f4a;overflow-y:auto;padding:8px" id="user-list"></div>
+      <div style="flex:1;overflow-y:auto" id="user-detail"><div class="empty">请从左侧选择一个用户</div></div>
+    </div>
+    <div id="user-status-bar" style="font-size:11px;color:var(--muted);padding:6px 12px;border-top:1px solid #2a2f4a"></div>
+  </main>
+  <main class="main" id="apidoc-main" style="display:none;overflow-y:auto">
+    <div class="config-wrap" id="apidoc-content"></div>
   </main>
   </div>
 </div>
@@ -502,18 +552,7 @@ async function saveConfig(){
   }catch(e){ alert(e.message); }
 }
 
-function switchMode(mode){
-  adminMode = mode;
-  document.querySelectorAll(".sidebar-nav button").forEach(b => {
-    b.classList.toggle("active", b.dataset.mode === mode);
-  });
-  $("robot-sidebar").style.display = mode === "robots" ? "" : "none";
-  $("robot-main").style.display = mode === "robots" ? "" : "none";
-  $("config-main").style.display = mode === "config" ? "" : "none";
-  if(mode === "config") loadConfig().catch(e => {
-    $("config-form").innerHTML = `<div class="empty">加载失败：${escapeHtml(e.message)}</div>`;
-  });
-}
+
 
 function adminHeaders(){
   const h = {"Content-Type":"application/json"};
@@ -871,9 +910,7 @@ $("token-save").addEventListener("click", () => {
   setStatus(v ? "Token 已保存" : "Token 已清除");
 });
 
-document.querySelectorAll(".sidebar-nav button").forEach(b => {
-  b.addEventListener("click", () => switchMode(b.dataset.mode));
-});
+
 $("btn-save-config").addEventListener("click", saveConfig);
 $("btn-reload-config").addEventListener("click", () => {
   loadConfig().catch(e => alert(e.message));
@@ -907,6 +944,228 @@ loadServiceInfo().catch(() => {});
 loadVoiceCatalog().catch(() => {});
 loadRobots().catch(e => {
   $("robot-list").innerHTML = `<div class="empty">加载失败：${escapeHtml(e.message)}</div>`;
+});
+
+// ========== Users Management ==========
+let selectedUser = null;
+
+async function loadUsers(){
+  const q = $("user-search").value.trim();
+  const path = q ? `/api/admin/users?q=${encodeURIComponent(q)}` : "/api/admin/users";
+  const data = await api(path);
+  const list = $("user-list");
+  list.innerHTML = "";
+  if(!data.items.length){
+    list.innerHTML = '<div class="empty">暂无用户</div>';
+    return;
+  }
+  data.items.forEach(u => {
+    const item = el("div", "user-item" + (selectedUser === u.user_id ? " active" : ""));
+    const name = u.nickname ? ` · ${escapeHtml(u.nickname)}` : (u.display_name ? ` · ${escapeHtml(u.display_name)}` : "");
+    const voice = u.voice_enrolled ? " · 声纹已录入" : "";
+    item.innerHTML = `<div class="uid">${escapeHtml(u.user_id)}${name}</div>
+      <div class="sub">设备 ${u.devices_count||0}${voice}${u.gender ? " · " + u.gender : ""}</div>`;
+    item.addEventListener("click", () => selectUser(u.user_id));
+    list.appendChild(item);
+  });
+}
+
+async function selectUser(userId){
+  selectedUser = userId;
+  await loadUsers();
+  try{
+    const detail = await api(`/api/admin/users/${encodeURIComponent(userId)}`);
+    const g = {male:"男", female:"女", other:"其他"}[detail.gender] || "未填";
+    const devices = (detail.devices||[]).map(d =>
+      `<div class="tag">${escapeHtml(d.device_id)} ${d.device_name ? "("+escapeHtml(d.device_name)+")" : ""}</div>`
+    ).join(" ");
+    $("user-detail").innerHTML = `
+      <div class="user-detail">
+        <h2 style="margin:0 0 14px;font-size:16px">${escapeHtml(detail.user_id)}</h2>
+        <div class="row">
+          <div class="field"><label>昵称</label><span>${escapeHtml(detail.nickname || "未设置")}</span></div>
+          <div class="field"><label>显示名</label><span>${escapeHtml(detail.display_name || "—")}</span></div>
+          <div class="field"><label>性别</label><span>${g}</span></div>
+          <div class="field"><label>生日</label><span>${escapeHtml(detail.birthday || "未设置")}</span></div>
+        </div>
+        <div class="row">
+          <div class="field"><label>声纹</label><span>${detail.voice_enrolled ? "已录入" : "未录入"}</span></div>
+          <div class="field"><label>创建时间</label><span>${escapeHtml(detail.created_at || "")}</span></div>
+          <div class="field"><label>更新时间</label><span>${escapeHtml(detail.updated_at || "")}</span></div>
+        </div>
+        <div class="row" style="margin-top:12px"><label style="font-size:12px;color:var(--muted)">绑定设备</label></div>
+        <div style="margin-top:4px">${devices || '<span style="color:var(--muted);font-size:12px">暂无绑定设备</span>'}</div>
+      </div>`;
+    setUserStatus("已加载用户：" + userId);
+  }catch(e){
+    $("user-detail").innerHTML = `<div class="empty">加载失败：${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function setUserStatus(msg){ $("user-status-bar").textContent = msg || ""; }
+
+$("btn-refresh-users").addEventListener("click", () => {
+  loadUsers().catch(e => setUserStatus("加载失败：" + e.message));
+});
+$("user-search").addEventListener("input", () => {
+  clearTimeout(window._userSearchTimer);
+  window._userSearchTimer = setTimeout(loadUsers, 300);
+});
+
+// ========== API Documentation ==========
+const API_DOCS = [
+  {
+    group: "设备绑定",
+    apis: [
+      {method:"POST", path:"/api/device/bind", desc:"设备绑定/注册。首次调用自动创建用户和机器人；已存在则返回绑定关系。",
+       body:`{
+  "device_id": "android-xxx",   // 必传，端侧唯一设备标识
+  "device_name": "小明的手机",  // 可选
+  "display_name": "小明",       // 可选
+  "user_id": null,              // 可选，指定用户ID
+  "robot_id": null              // 可选，指定机器人ID
+}`,
+       resp:`{
+  "device_id": "android-xxx",
+  "user_id": "usr-xxxxxxxxxxxx",
+  "robot_id": "robot-xxxxxxxxxxxx",
+  "new_user": true,
+  "new_device": true
+}`},
+      {method:"GET", path:"/api/device/bind?device_id=xxx", desc:"查询设备绑定信息。"}
+    ]
+  },
+  {
+    group: "用户接口",
+    apis: [
+      {method:"GET", path:"/api/users/{userId}/profile", desc:"获取用户档案信息（昵称、性别、生日、头像、声纹状态等）。",
+       resp:`{
+  "user_id": "usr-xxx",
+  "display_name": "小明",
+  "nickname": "小明",
+  "gender": "male",
+  "birthday": "2000-01-15",
+  "avatar_url": null,
+  "voice_enrolled": false,
+  "created_at": "2026-07-02 10:00:00",
+  "updated_at": "2026-07-02 10:00:00"
+}`},
+      {method:"PUT", path:"/api/users/{userId}/profile", desc:"更新用户档案（部分更新，仅传需要修改的字段）。",
+       body:`{
+  "nickname": "小明",        // 昵称
+  "gender": "male",         // male/female/other
+  "birthday": "2000-01-15", // YYYY-MM-DD
+  "avatar_url": "https://..." // 头像URL
+}`},
+      {method:"GET", path:"/api/users/{userId}/voice", desc:"获取用户声纹原始音频数据（base64编码）。"},
+      {method:"DELETE", path:"/api/users/{userId}/voice", desc:"删除用户声纹数据。"},
+      {method:"GET", path:"/api/users/{userId}/robots", desc:"查询用户绑定的所有机器人列表。",
+       resp:`[
+  {
+    "device_id": "android-xxx",
+    "robot_id": "robot-xxx",
+    "device_name": "小明的手机",
+    "bound_at": "2026-07-02 10:00:00",
+    "last_seen_at": "2026-07-02 11:00:00"
+  }
+]`}
+    ]
+  },
+  {
+    group: "机器人接口",
+    apis: [
+      {method:"GET", path:"/api/robots/{robotId}/config", desc:"获取机器人配置（名称、人设、音色、问候语等）。",
+       resp:`{
+  "robot_id": "robot-xxx",
+  "display_name": "狗蛋",
+  "persona": "我是一个友好的机器人伙伴",
+  "voice_id": "zhitian_emo",
+  "voice_style": "",
+  "greeting": "你好呀，今天想聊什么？",
+  "avatar_url": null,
+  "language": "zh-CN",
+  "created_at": "2026-07-02 10:00:00",
+  "last_seen_at": "2026-07-02 11:00:00"
+}`},
+      {method:"PUT", path:"/api/robots/{robotId}/config", desc:"更新机器人配置（部分更新）。",
+       body:`{
+  "display_name": "狗蛋",
+  "persona": "我是小明最好的朋友，性格开朗活泼",
+  "voice_id": "zhitian_emo",
+  "voice_style": "",
+  "greeting": "你好呀主人，今天过得怎么样？",
+  "avatar_url": "https://..."
+}`},
+      {method:"GET", path:"/api/robots/{robotId}/owner", desc:"获取机器人主人档案信息。"},
+      {method:"PUT", path:"/api/robots/{robotId}/owner", desc:"设置/更新机器人主人档案。"},
+      {method:"DELETE", path:"/api/robots/{robotId}/owner", desc:"清除机器人主人档案。"}
+    ]
+  },
+  {
+    group: "对话接口",
+    apis: [
+      {method:"POST", path:"/api/session/new?robot_id=xxx", desc:"创建新会话，返回session_id。"},
+      {method:"POST", path:"/api/chat", desc:"发送聊天消息（非流式），支持文本输入和多模态感知。"},
+      {method:"POST", path:"/api/chat/stream", desc:"流式聊天接口（NDJSON格式），实时返回STT和回复。"},
+      {method:"POST", path:"/api/tts", desc:"文本转语音（一次性返回音频）。"},
+      {method:"POST", path:"/api/tts/stream", desc:"流式TTS接口，逐块返回PCM音频数据。"}
+    ]
+  }
+];
+
+function renderApiDoc(){
+  const wrap = $("apidoc-content");
+  wrap.innerHTML = "";
+  wrap.appendChild(el("h2", "", "Pophie API 接口文档"));
+  wrap.appendChild(el("p", "config-note", "所有接口默认返回 JSON 格式。错误响应：{"error":"错误信息", "status":400}"));
+
+  API_DOCS.forEach(group => {
+    wrap.appendChild(el("div", "api-group", group.group));
+    const sect = el("div", "apidoc-section");
+    group.apis.forEach(api => {
+      const item = el("div", "api-item");
+      item.innerHTML = `<div><span class="method ${api.method.toLowerCase()}">${api.method}</span>
+        <span class="path">${escapeHtml(api.path)}</span></div>
+        <div class="desc">${escapeHtml(api.desc)}</div>`;
+      if(api.body){
+        item.innerHTML += `<div class="desc" style="margin-top:6px"><b>请求体示例：</b></div>
+          <pre>${escapeHtml(api.body)}</pre>`;
+      }
+      if(api.resp){
+        item.innerHTML += `<div class="desc" style="margin-top:6px"><b>响应示例：</b></div>
+          <pre>${escapeHtml(api.resp)}</pre>`;
+      }
+      sect.appendChild(item);
+    });
+    wrap.appendChild(sect);
+  });
+}
+
+function switchMode(mode){
+  adminMode = mode;
+  document.querySelectorAll(".sidebar-nav button").forEach(b => {
+    b.classList.toggle("active", b.dataset.mode === mode);
+  });
+  $("robot-sidebar").style.display = mode === "robots" || mode === "users" ? "" : "none";
+  $("robot-main").style.display = mode === "robots" ? "" : "none";
+  $("users-main").style.display = mode === "users" ? "" : "none";
+  $("config-main").style.display = mode === "config" ? "" : "none";
+  $("apidoc-main").style.display = mode === "apidoc" ? "" : "none";
+  if(mode === "config") loadConfig().catch(e => {
+    $("config-form").innerHTML = `<div class="empty">加载失败：${escapeHtml(e.message)}</div>`;
+  });
+  if(mode === "users"){
+    loadUsers().catch(e => {
+      $("user-list").innerHTML = `<div class="empty">加载失败：${escapeHtml(e.message)}</div>`;
+    });
+  }
+  if(mode === "apidoc"){
+    renderApiDoc();
+  }
+}
+
+document.querySelectorAll(".sidebar-nav button").forEach(b => {
+  b.addEventListener("click", () => switchMode(b.dataset.mode));
 });
 </script>
 </body>
