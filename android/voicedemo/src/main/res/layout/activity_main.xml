@@ -284,6 +284,24 @@
             android:singleLine="true"
             android:text="http://10.0.2.2:8000" />
 
+        <EditText
+            android:id="@+id/mqttBrokerUrl"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:hint="MQTT Broker地址（如tcp://192.168.1.100:1883，留空则用长连接）"
+            android:inputType="textUri"
+            android:singleLine="true"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/mqttStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="#757575"
+            android:text="MQTT：未配置（使用WebSocket长连接模式）" />
+
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

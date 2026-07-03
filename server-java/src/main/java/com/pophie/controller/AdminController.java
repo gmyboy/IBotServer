@@ -13,6 +13,7 @@ import com.pophie.schema.AdminModels;
 import com.pophie.service.ChatService;
 import com.pophie.service.MemoryService;
 import com.pophie.service.SpeechService;
+import com.pophie.service.ReplyNotifyService;
 import com.pophie.service.RobotService;
 import com.pophie.service.UserService;
 import org.slf4j.Logger;
@@ -49,6 +50,7 @@ public class AdminController {
     private final MemoryService memory;
     private final SpeechService speech;
     private final ChatService chatService;
+    private final ReplyNotifyService replyNotify;
     private final MemoryRepository memoryRepo;
     private final ConversationRepository conversationRepo;
     private final ReminderRepository reminderRepo;
@@ -58,7 +60,8 @@ public class AdminController {
     private final UserService userService;
 
     public AdminController(RuntimeConfigService cfg, RobotService robotService, MemoryService memory,
-                           SpeechService speech, ChatService chatService, MemoryRepository memoryRepo,
+                           SpeechService speech, ChatService chatService, ReplyNotifyService replyNotify,
+                           MemoryRepository memoryRepo,
                            ConversationRepository conversationRepo, ReminderRepository reminderRepo,
                            ProactiveLogRepository proactiveLogRepo,
                            VoiceSegmentLogRepository voiceSegmentLogRepo,
@@ -68,6 +71,7 @@ public class AdminController {
         this.memory = memory;
         this.speech = speech;
         this.chatService = chatService;
+        this.replyNotify = replyNotify;
         this.memoryRepo = memoryRepo;
         this.conversationRepo = conversationRepo;
         this.reminderRepo = reminderRepo;
@@ -151,6 +155,53 @@ public class AdminController {
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("ok", true);
         m.put("id", memId);
+        return m;
+    }
+
+    /** 管理员向指定机器人/用户推送消息（触发TTS播报）。
+     *  - 指定 robot_id + user_id：推送到该机器人该用户
+     *  - 只指定 user_id：推送到该用户绑定的所有机器人
+     *  - 只指定 robot_id：推送到该机器人的 default 用户
+     */
+    @PostMapping("/push")
+    public Map<String, Object> pushMessage(@RequestBody Map<String, Object> body) {
+        String robotId = asStr(body.get("robot_id"));
+        String userId = asStr(body.get("user_id"));
+        String text = asStr(body.get("text"));
+        if (text == null || text.isBlank()) {
+            throw new ApiException(400, "text 不能为空");
+        }
+        String sessionId = asStr(body.get("session_id"));
+
+        java.util.List<String> targets = new java.util.ArrayList<>();
+        if (robotId != null && !robotId.isBlank() && !"default".equals(robotId)) {
+            String uid = (userId != null && !userId.isBlank()) ? userId : "default";
+            replyNotify.notifyReply(robotId, uid, sessionId, text, "admin_push");
+            targets.add(robotId + ":" + uid);
+        } else if (userId != null && !userId.isBlank() && !"default".equals(userId)) {
+            List<Map<String, Object>> devices = userService.listBoundRobots(userId);
+            if (devices.isEmpty()) {
+                replyNotify.notifyReply("default", userId, sessionId, text, "admin_push");
+                targets.add("default:" + userId);
+            } else {
+                Set<String> pushed = new java.util.HashSet<>();
+                for (Map<String, Object> d : devices) {
+                    String rid = String.valueOf(d.get("robot_id"));
+                    if (pushed.add(rid)) {
+                        replyNotify.notifyReply(rid, userId, sessionId, text, "admin_push");
+                        targets.add(rid + ":" + userId);
+                    }
+                }
+            }
+        } else {
+            throw new ApiException(400, "必须指定 robot_id 或 user_id");
+        }
+
+        log.info("[admin.push] targets={} text={}", targets, text);
+        Map<String, Object> m = new LinkedHashMap<>();
+        m.put("ok", true);
+        m.put("targets", targets);
+        m.put("text", text);
         return m;
     }
 
@@ -247,6 +298,10 @@ public class AdminController {
         m.put("scope", scope);
         m.put("deleted", deleted);
         return m;
+    }
+
+    private static String asStr(Object o) {
+        return o == null ? null : o.toString();
     }
 
     /** 重启进程：延迟后退出，由容器/进程守护（docker-compose restart 策略 / systemd）拉起。 */

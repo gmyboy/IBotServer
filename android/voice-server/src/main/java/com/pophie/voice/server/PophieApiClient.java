@@ -133,14 +133,8 @@ public final class PophieApiClient {
     }
 
     public SessionInfo newSession() throws IOException {
-        String q;
-        if (deviceId != null && !deviceId.isEmpty()) {
-            q = "device_id=" + deviceId;
-        } else {
-            q = "robot_id=" + robotId + "&user_id=" + userId;
-        }
         Request req = new Request.Builder()
-                .url(baseUrl + "api/session/new?" + q)
+                .url(baseUrl + "api/sessions")
                 .post(RequestBody.create("", JSON))
                 .build();
         try (Response resp = client.newCall(req).execute()) {
@@ -149,13 +143,10 @@ public final class PophieApiClient {
                 throw new IOException("HTTP " + resp.code() + ": " + body);
             }
             JSONObject json = new JSONObject(body);
-            String rid = json.optString("robot_id", robotId);
-            String uid = json.optString("user_id", userId);
-            applyIdentity(rid, uid);
             return new SessionInfo(
                     json.optString("session_id", ""),
-                    rid,
-                    uid);
+                    robotId,
+                    userId);
         } catch (JSONException e) {
             throw new IOException(e);
         }

@@ -1,8 +1,9 @@
-# macOS 本机部署：数据库/缓存/日志/配置落到 ${DATA_ROOT}，适配 Docker Desktop。
+# macOS 本机部署：数据库/缓存/MQTT/日志/配置落到 ${DATA_ROOT}，适配 Docker Desktop。
 # 用法（在 server-java 目录）：
+#   bash deploy/macos-deploy.sh          # 推荐：自动写 .env 与数据目录
 #   docker compose -f docker-compose.macos.yml up -d --build
-# DATA_ROOT/HOST_PORT/MYSQL_HOST_PORT/REDIS_HOST_PORT 由同目录 .env 提供（deploy/macos-deploy.sh 会自动写入）。
-# 端口绑定到 0.0.0.0，方便同一局域网内用本机 IP 访问。
+# DATA_ROOT 未设置时默认 ./.pophie-data（项目内，Docker Desktop 可直接挂载）。
+# HOST_PORT 未设置时读 APP_HOST_PORT，再默认 9901。
 services:
   app:
     build: .
@@ -13,6 +14,8 @@ services:
       mysql:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      mqtt:
         condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
@@ -28,11 +31,14 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      MQTT_BROKER: tcp://mqtt:1883
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
     ports:
-      - "0.0.0.0:${HOST_PORT:-9901}:8000"
+      - "0.0.0.0:${HOST_PORT:-${APP_HOST_PORT:-9901}}:8000"
     volumes:
-      - ${DATA_ROOT}/logs:/app/logs
-      - ${DATA_ROOT}/config.yaml:/app/config.yaml
+      - ${DATA_ROOT:-./.pophie-data}/logs:/app/logs
+      - ${DATA_ROOT:-./.pophie-data}/config.yaml:/app/config.yaml
     networks:
       - pophie-net
 
@@ -48,9 +54,9 @@ services:
     ports:
       - "0.0.0.0:${MYSQL_HOST_PORT:-9902}:3306"
     volumes:
-      - ${DATA_ROOT}/mysql:/var/lib/mysql
+      - ${DATA_ROOT:-./.pophie-data}/mysql:/var/lib/mysql
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}"]
+      test: ["CMD", "mysql", "-h", "localhost", "-u", "root", "-p${DB_ROOT_PASSWORD}", "-e", "SELECT 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -65,11 +71,34 @@ services:
     ports:
       - "0.0.0.0:${REDIS_HOST_PORT:-9903}:6379"
     volumes:
-      - ${DATA_ROOT}/redis:/data
+      - ${DATA_ROOT:-./.pophie-data}/redis:/data
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "--no-auth-warning", "ping"]
       interval: 10s
       timeout: 5s
+      retries: 5
+    networks:
+      - pophie-net
+
+  mqtt:
+    image: emqx/emqx:5.8
+    container_name: pophie-mqtt
+    restart: unless-stopped
+    environment:
+      EMQX_ALLOW_ANONYMOUS: "true"
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${MQTT_DASHBOARD_USER:-admin}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${MQTT_DASHBOARD_PASSWORD:-public}
+    ports:
+      - "0.0.0.0:${MQTT_HOST_PORT:-1883}:1883"
+      - "0.0.0.0:${MQTT_WS_PORT:-8083}:8083"
+      - "0.0.0.0:${MQTT_DASHBOARD_PORT:-18083}:18083"
+    volumes:
+      - ${DATA_ROOT:-./.pophie-data}/mqtt-data:/opt/emqx/data
+      - ${DATA_ROOT:-./.pophie-data}/mqtt-log:/opt/emqx/log
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 15s
+      timeout: 10s
       retries: 5
     networks:
       - pophie-net

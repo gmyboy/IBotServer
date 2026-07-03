@@ -16,9 +16,12 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_DIR"
 
 DATA_ROOT="${HOME}/PophieData"
-HOST_PORT="9901"
+HOST_PORT="9900"
 MYSQL_HOST_PORT="9902"
 REDIS_HOST_PORT="9903"
+MQTT_HOST_PORT="1883"
+MQTT_WS_PORT="8083"
+MQTT_DASHBOARD_PORT="18083"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -69,6 +72,13 @@ if ! [[ "$REDIS_HOST_PORT" =~ ^[0-9]+$ ]] || [[ "$REDIS_HOST_PORT" -lt 1 ]] || [
   echo "[ERROR] --redis-port 必须是 1-65535 之间的数字"
   exit 1
 fi
+for _mqtt_var in MQTT_HOST_PORT MQTT_WS_PORT MQTT_DASHBOARD_PORT; do
+  _mqtt_val="${!_mqtt_var}"
+  if ! [[ "$_mqtt_val" =~ ^[0-9]+$ ]] || [[ "$_mqtt_val" -lt 1 ]] || [[ "$_mqtt_val" -gt 65535 ]]; then
+    echo "[ERROR] ${_mqtt_var} 必须是 1-65535 之间的数字"
+    exit 1
+  fi
+done
 
 detect_access_host() {
   local iface ip
@@ -97,6 +107,7 @@ echo "[INFO] 数据目录: ${DATA_ROOT}"
 echo "[INFO] 访问端口: ${HOST_PORT}"
 echo "[INFO] MySQL 端口: ${MYSQL_HOST_PORT}"
 echo "[INFO] Redis 端口: ${REDIS_HOST_PORT}"
+echo "[INFO] MQTT 端口: ${MQTT_HOST_PORT} (WS ${MQTT_WS_PORT}, Dashboard ${MQTT_DASHBOARD_PORT})"
 
 # ----- 1. 检查 macOS 与 Docker Desktop -----
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -124,7 +135,8 @@ ACCESS_HOST="$(detect_access_host)"
 echo "[INFO] 访问 IP: ${ACCESS_HOST}"
 
 # ----- 2. 创建本机数据目录 -----
-mkdir -p "${DATA_ROOT}/mysql" "${DATA_ROOT}/redis" "${DATA_ROOT}/logs"
+mkdir -p "${DATA_ROOT}/mysql" "${DATA_ROOT}/redis" "${DATA_ROOT}/logs" \
+  "${DATA_ROOT}/mqtt-data" "${DATA_ROOT}/mqtt-log"
 
 # ----- 3. config.yaml（挂载到容器） -----
 if [[ ! -f "${DATA_ROOT}/config.yaml" ]]; then
@@ -179,6 +191,11 @@ if [[ ! -f .env ]]; then
     echo "HOST_PORT=${HOST_PORT}"
     echo "MYSQL_HOST_PORT=${MYSQL_HOST_PORT}"
     echo "REDIS_HOST_PORT=${REDIS_HOST_PORT}"
+    echo "MQTT_HOST_PORT=${MQTT_HOST_PORT}"
+    echo "MQTT_WS_PORT=${MQTT_WS_PORT}"
+    echo "MQTT_DASHBOARD_PORT=${MQTT_DASHBOARD_PORT}"
+    echo "MQTT_DASHBOARD_USER=admin"
+    echo "MQTT_DASHBOARD_PASSWORD=public"
     echo "LLM_API_KEY="
     echo "DASHSCOPE_API_KEY="
     echo "ADMIN_TOKEN="
@@ -234,10 +251,45 @@ else
     printf 'REDIS_HOST_PORT=%s\n' "${REDIS_HOST_PORT}" >> .env
     echo "[INFO] 已补写 REDIS_HOST_PORT=${REDIS_HOST_PORT} 到 .env"
   fi
+
+  for _pair in \
+    "MQTT_HOST_PORT:${MQTT_HOST_PORT}" \
+    "MQTT_WS_PORT:${MQTT_WS_PORT}" \
+    "MQTT_DASHBOARD_PORT:${MQTT_DASHBOARD_PORT}"; do
+    _key="${_pair%%:*}"
+    _val="${_pair#*:}"
+    if grep -q "^${_key}=" .env; then
+      if [[ "$(uname -s)" == "Darwin" ]]; then
+        sed -i '' "s|^${_key}=.*|${_key}=${_val}|" .env
+      else
+        sed -i "s|^${_key}=.*|${_key}=${_val}|" .env
+      fi
+      echo "[INFO] 已更新 .env 中的 ${_key}=${_val}"
+    else
+      printf '%s=%s\n' "${_key}" "${_val}" >> .env
+      echo "[INFO] 已补写 ${_key}=${_val} 到 .env"
+    fi
+  done
+
+  if ! grep -q '^MQTT_DASHBOARD_USER=' .env; then
+    printf 'MQTT_DASHBOARD_USER=admin\nMQTT_DASHBOARD_PASSWORD=public\n' >> .env
+    echo "[INFO] 已补写 MQTT Dashboard 默认账号到 .env"
+  fi
+
+  # 兼容旧 .env：仅有 APP_HOST_PORT 时同步为 HOST_PORT
+  if ! grep -q '^HOST_PORT=' .env && grep -q '^APP_HOST_PORT=' .env; then
+    HOST_PORT="$(grep '^APP_HOST_PORT=' .env | head -1 | cut -d= -f2-)"
+    printf 'HOST_PORT=%s\n' "${HOST_PORT}" >> .env
+    echo "[INFO] 已从 APP_HOST_PORT 补写 HOST_PORT=${HOST_PORT}"
+  fi
 fi
 
 if grep -qE '^[A-Z_]+=change-me' .env; then
-  echo "[ERROR] .env 中仍有 change-me 占位密码，请替换为真实强密码："
+  echo "[ERROR] .env 中仍有 change-me 占位密码，无法启动容器。"
+  echo "        任选其一："
+  echo "        1) 删除 .env 后重跑： rm .env && bash deploy/macos-deploy.sh"
+  echo "        2) 手动替换 DB_ROOT_PASSWORD / DB_PASSWORD / REDIS_PASSWORD 与 AES_KEY"
+  echo "           AES_KEY 生成：openssl rand -base64 32"
   grep -nE '^[A-Z_]+=change-me' .env
   exit 1
 fi
@@ -247,8 +299,9 @@ if grep -qE '^AES_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=' .env; then
   exit 1
 fi
 
-# ----- 4.5 将 .env 业务密钥同步到 config.yaml（本地 IDE / 容器挂载共用） -----
+# ----- 4.5 将 .env 同步到 config.yaml 与 IDE 本地配置 -----
 bash deploy/sync-env-to-config.sh
+bash deploy/sync-env-to-local-properties.sh
 
 # ----- 5. 构建并启动 -----
 echo "[INFO] 构建并启动容器（数据落 ${DATA_ROOT}）..."
@@ -271,6 +324,21 @@ for i in $(seq 1 30); do
   [[ "$status" == "healthy" ]] && break
 done
 
+read_env_val() {
+  local key="$1" fallback="$2"
+  if [[ -f .env ]] && grep -q "^${key}=" .env; then
+    grep "^${key}=" .env | head -1 | cut -d= -f2-
+  else
+    echo "$fallback"
+  fi
+}
+
+MQTT_DASHBOARD_USER="$(read_env_val MQTT_DASHBOARD_USER admin)"
+MQTT_DASHBOARD_PASSWORD="$(read_env_val MQTT_DASHBOARD_PASSWORD public)"
+MQTT_HOST_PORT="$(read_env_val MQTT_HOST_PORT "${MQTT_HOST_PORT}")"
+MQTT_WS_PORT="$(read_env_val MQTT_WS_PORT "${MQTT_WS_PORT}")"
+MQTT_DASHBOARD_PORT="$(read_env_val MQTT_DASHBOARD_PORT "${MQTT_DASHBOARD_PORT}")"
+
 echo
 echo "===== 部署完成 ====="
 docker compose -f docker-compose.macos.yml ps
@@ -279,6 +347,9 @@ echo "  - 健康： curl http://${ACCESS_HOST}:${HOST_PORT}/api/health"
 echo "  - 前端： http://${ACCESS_HOST}:${HOST_PORT}/   后台： http://${ACCESS_HOST}:${HOST_PORT}/admin"
 echo "  - MySQL： ${ACCESS_HOST}:${MYSQL_HOST_PORT}  数据库/用户见 server-java/.env 的 DB_NAME / DB_USER / DB_PASSWORD"
 echo "  - Redis： ${ACCESS_HOST}:${REDIS_HOST_PORT}  密码见 server-java/.env 的 REDIS_PASSWORD"
-echo "  - 数据： ${DATA_ROOT}/{mysql,redis,logs,config.yaml}"
+echo "  - MQTT Broker： tcp://${ACCESS_HOST}:${MQTT_HOST_PORT}  （容器内服务用 tcp://mqtt:1883）"
+echo "  - MQTT WebSocket： ws://${ACCESS_HOST}:${MQTT_WS_PORT}/mqtt"
+echo "  - MQTT Dashboard： http://${ACCESS_HOST}:${MQTT_DASHBOARD_PORT}/  账号 ${MQTT_DASHBOARD_USER} / ${MQTT_DASHBOARD_PASSWORD}"
+echo "  - 数据： ${DATA_ROOT}/{mysql,redis,logs,mqtt-data,mqtt-log,config.yaml}"
 echo "  - 日志： docker compose -f docker-compose.macos.yml logs -f app"
 echo "  - 停止： docker compose -f docker-compose.macos.yml down  (数据保留在 ${DATA_ROOT})"

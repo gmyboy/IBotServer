@@ -53,12 +53,22 @@ const routes: RouteRecordRaw[] = [
     },
   },
   {
+    name: 'Push',
+    path: '/push',
+    component: () => import('#/views/pophie/push/index.vue'),
+    meta: {
+      icon: 'lucide:send',
+      order: 6,
+      title: '消息推送',
+    },
+  },
+  {
     name: 'Service',
     path: '/service',
     component: () => import('#/views/pophie/service/index.vue'),
     meta: {
       icon: 'lucide:server',
-      order: 6,
+      order: 7,
       title: '服务管理',
     },
   },

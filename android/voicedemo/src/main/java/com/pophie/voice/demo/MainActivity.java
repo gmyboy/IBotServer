@@ -43,6 +43,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_SERVER_URL = "server_url";
     private static final String KEY_SESSION_ID = "session_id";
     private static final String KEY_DEVICE_ID = "device_id";
+    private static final String KEY_MQTT_BROKER = "mqtt_broker";
 
     private static final String ENROLL_TEXT = "你好，我是你的主人，以后主要由我来跟你说话，记住我的声音就好";
 
@@ -53,8 +54,8 @@ public class MainActivity extends AppCompatActivity {
 
     private TextView status, speaker, meter, log, enrollHint, verifyResult, cohortInfo;
     private TextView serverStatus, sttResult, replyResult, deviceBindInfo;
-    private TextView tvUserInfo, tvRobotInfo, timingInfo;
-    private EditText serverUrl;
+    private TextView tvUserInfo, tvRobotInfo, timingInfo, mqttStatus;
+    private EditText serverUrl, mqttBrokerUrl;
     private EditText etUserNickname, etUserGender, etUserBirthday;
     private EditText etRobotName, etRobotPersona, etRobotGreeting;
     private SwitchMaterial switchRealtimeStt;
@@ -130,6 +131,8 @@ public class MainActivity extends AppCompatActivity {
         verifyResult = findViewById(R.id.verifyResult);
         cohortInfo = findViewById(R.id.cohortInfo);
         serverUrl = findViewById(R.id.serverUrl);
+        mqttBrokerUrl = findViewById(R.id.mqttBrokerUrl);
+        mqttStatus = findViewById(R.id.mqttStatus);
         switchRealtimeStt = findViewById(R.id.switchRealtimeStt);
         switchChat = findViewById(R.id.switchChat);
         serverStatus = findViewById(R.id.serverStatus);
@@ -148,11 +151,14 @@ public class MainActivity extends AppCompatActivity {
 
         SharedPreferences prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         String savedUrl = prefs.getString(KEY_SERVER_URL, "http://192.168.23.156:9901/");
+        String savedMqtt = prefs.getString(KEY_MQTT_BROKER, "");
         String sessionId = prefs.getString(KEY_SESSION_ID, "");
 
         serverUrl.setText(savedUrl);
-        initServerBridge(savedUrl, sessionId);
+        mqttBrokerUrl.setText(savedMqtt);
+        initServerBridge(savedUrl, savedMqtt, sessionId);
         updateDeviceBindInfoLine();
+        updateMqttStatusLine();
 
         Button btnStart = findViewById(R.id.btnStart);
         Button btnStop = findViewById(R.id.btnStop);
@@ -173,7 +179,10 @@ public class MainActivity extends AppCompatActivity {
         findViewById(R.id.btnLoadRobot).setOnClickListener(v -> loadRobotConfig());
 
         serverUrl.setOnFocusChangeListener((v, hasFocus) -> {
-            if (!hasFocus) persistServerUrl();
+            if (!hasFocus) persistServerConfig();
+        });
+        mqttBrokerUrl.setOnFocusChangeListener((v, hasFocus) -> {
+            if (!hasFocus) persistServerConfig();
         });
 
         switchRealtimeStt.setOnCheckedChangeListener((btn, checked) -> {
@@ -252,7 +261,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startEngineAfterEnrollCheck() {
-        persistServerUrl();
+        persistServerConfig();
         status.setText("状态：检查是否已登记主人…");
         new Thread(() -> {
             boolean enrolled = engine.isOwnerEnrolled();
@@ -306,11 +315,12 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void initServerBridge(String baseUrl, String sessionId) {
+    private void initServerBridge(String baseUrl, String mqttBroker, String sessionId) {
         String deviceId = ensureDeviceId();
         VoiceServerConfig config = new VoiceServerConfig.Builder()
                 .baseUrl(baseUrl)
                 .deviceId(deviceId)
+                .mqttBroker(mqttBroker)
                 .build();
         serverBridge = new VoiceServerBridge(config);
         serverBridge.setSessionId(sessionId);
@@ -349,6 +359,11 @@ public class MainActivity extends AppCompatActivity {
             public void onSttError(String message) {
                 sttResult.setText("STT：错误 " + message);
                 toast("实时 STT：" + message);
+            }
+
+            @Override
+            public void onMqttStatus(boolean connected, String error) {
+                updateMqttStatusLine(connected, error);
             }
 
             @Override
@@ -473,10 +488,52 @@ public class MainActivity extends AppCompatActivity {
         return id;
     }
 
-    private void persistServerUrl() {
+    private void persistServerConfig() {
         String url = serverUrl.getText().toString().trim();
+        String mqtt = mqttBrokerUrl.getText().toString().trim();
         serverBridge.setBaseUrl(url);
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_SERVER_URL, url).apply();
+        serverBridge.updateMqttBroker(mqtt, "", "");
+        updateMqttStatusLine();
+        SharedPreferences.Editor editor = getSharedPreferences(PREFS, MODE_PRIVATE).edit();
+        editor.putString(KEY_SERVER_URL, url);
+        editor.putString(KEY_MQTT_BROKER, mqtt);
+        editor.apply();
+    }
+
+    private void updateMqttStatusLine() {
+        if (serverBridge == null) return;
+        if (!serverBridge.isMqttEnabled()) {
+            mqttStatus.setText("MQTT：未配置（使用WebSocket长连接模式）");
+            return;
+        }
+        if (serverBridge.isMqttConnected()) {
+            mqttStatus.setText("MQTT：已连接 ✓（唤醒短连接模式）");
+            mqttStatus.setTextColor(0xFF2E7D32);
+        } else {
+            mqttStatus.setText("MQTT：连接中…（唤醒短连接模式）");
+            mqttStatus.setTextColor(0xFFEF6C00);
+        }
+    }
+
+    private void updateMqttStatusLine(boolean connected, String error) {
+        ui.post(() -> {
+            if (!serverBridge.isMqttEnabled()) {
+                mqttStatus.setText("MQTT：未配置（使用WebSocket长连接模式）");
+                mqttStatus.setTextColor(0xFF757575);
+                return;
+            }
+            if (connected) {
+                mqttStatus.setText("MQTT：已连接 ✓（唤醒短连接模式）");
+                mqttStatus.setTextColor(0xFF2E7D32);
+            } else {
+                String msg = "MQTT：断开";
+                if (error != null && !error.isEmpty()) {
+                    msg += " - " + error;
+                }
+                mqttStatus.setText(msg);
+                mqttStatus.setTextColor(0xFFC62828);
+            }
+        });
     }
 
     private void persistSessionId(String id) {
@@ -488,7 +545,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void bindDevice() {
-        persistServerUrl();
+        persistServerConfig();
         deviceBindInfo.setText("设备：绑定中…");
         serverBridge.bindDevice();
     }
@@ -625,14 +682,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void testServerConnection() {
-        persistServerUrl();
+        persistServerConfig();
         serverStatus.setText("服务：检测中…");
         serverBridge.connectReplyNotify();
         serverBridge.testConnection();
     }
 
     private void testReplyPush() {
-        persistServerUrl();
+        persistServerConfig();
         replyResult.setText("回复：等待测试推送…");
         serverBridge.testReplyPush();
     }

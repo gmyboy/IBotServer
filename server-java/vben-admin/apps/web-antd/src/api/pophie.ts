@@ -32,6 +32,7 @@ export namespace PophieApi {
     created_at?: null | string;
     last_seen_at?: null | string;
     devices_count?: number;
+    robot_ids?: string[];
   }
 
   export interface ServiceInfo {
@@ -51,6 +52,12 @@ export namespace PophieApi {
   }
 
   export type WipeScope = 'all' | 'conversations' | 'memories' | 'reminders';
+
+  export interface PushResult {
+    ok: boolean;
+    targets: string[];
+    text: string;
+  }
 }
 
 /* ---------------- 机器人 ---------------- */
@@ -147,4 +154,15 @@ export async function restartServiceApi() {
 
 export async function wipeApi(scope: PophieApi.WipeScope, robotId: string) {
   return requestClient.post('/admin/wipe', { scope, robot_id: robotId });
+}
+
+/* ---------------- 消息推送 ---------------- */
+
+export async function pushMessageApi(params: {
+  user_id?: string;
+  robot_id?: string;
+  text: string;
+  session_id?: string;
+}) {
+  return requestClient.post<PophieApi.PushResult>('/admin/push', params);
 }

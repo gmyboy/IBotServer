@@ -11,6 +11,14 @@
 一键启动（在 `server-java` 目录）：
 ```bash
 bash deploy/macos-deploy.sh
+```
+**不要**在未配置 `DATA_ROOT` 时直接 `docker compose -f docker-compose.macos.yml up`（旧 `.env` 会导致挂载 `/redis` 失败）。若必须手写 compose，请在 `.env` 中设置：
+```bash
+DATA_ROOT=$HOME/PophieData
+HOST_PORT=9901
+```
+
+```bash
 # 自定义数据目录：
 bash deploy/macos-deploy.sh --data-root "$HOME/PophieData"
 # 自定义宿主机端口：
@@ -26,6 +34,7 @@ bash deploy/macos-deploy.sh --redis-port 9903
 启用 LLM / 语音 / 后台口令：编辑 `server-java/.env` 填 `LLM_API_KEY` / `DASHSCOPE_API_KEY` / `ADMIN_TOKEN`，重跑脚本即可。
 
 - 访问：前端 `http://<本机IP>:9901/`，后台 `http://<本机IP>:9901/admin`，健康 `http://<本机IP>:9901/api/health`
+- MQTT：`tcp://<本机IP>:1883`，WebSocket `ws://<本机IP>:8083/mqtt`，控制台 `http://<本机IP>:18083/`（默认 `admin` / `public`）
 - 默认数据位置：`~/PophieData/{mysql,redis,logs,config.yaml}`
 - 停止（保留数据）：`docker compose -f docker-compose.macos.yml down`
 
@@ -35,6 +44,28 @@ bash deploy/macos-deploy.sh --redis-port 9903
 ```bash
 ipconfig getifaddr en0 || ipconfig getifaddr en1
 ```
+
+### IntelliJ 本机调试（连 Docker 里的 MySQL/Redis）
+
+Docker 跑在 **9900/9901**（`HOST_PORT`），IDE 本地跑 **9901** 时，数据库仍连容器映射端口（默认 **9902**）。
+
+每次改 `.env` 或重跑部署后，同步 IDE 配置：
+
+```bash
+cd server-java
+bash deploy/sync-env-to-local-properties.sh
+```
+
+IntelliJ → Run Configuration → **Active profiles: `dev,local`**，再启动 `Application`。
+
+若仍报 `Access denied`：多为 **MySQL 数据目录是旧密码初始化的**（改过 `.env` 但未删数据卷）。重置库（会清空库内数据）：
+
+```bash
+cd server-java
+bash deploy/reset-mysql-volume.sh   # 交互确认，会删库重建
+```
+
+端口对照：**Docker 应用** `HOST_PORT`（你当前 Docker 若是 9900，见 `.env` 的 `APP_HOST_PORT` / `HOST_PORT`）；**IDE 本地** `application-local.properties` 里 `server.port=9901`；**MySQL** 连 `127.0.0.1:9902`（不是 9900/9901）。
 
 ### IntelliJ 数据库与 Redis 连接
 

@@ -2,6 +2,7 @@ package com.pophie.voice.server;
 
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 
 import com.pophie.voice.GateMode;
 import com.pophie.voice.VoiceEngine;
@@ -12,22 +13,17 @@ import com.pophie.voice.WavUtil;
 import java.io.IOException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
-/**
- * 桥接 {@link com.pophie.voice.VoiceEngine} 与 Pophie 服务端：
- * <ul>
- *   <li>实时 STT（WebSocket，近场门控，与声纹无关）</li>
- *   <li>段结束 chat/stream（可选，可配合 OWNER_ONLY 门控）</li>
- *   <li>回复通知 + 服务端 TTS 音频播放（独立线程，不阻断采集）</li>
- *   <li>主动发言/提醒订阅 {@code /api/reply/notify}</li>
- * </ul>
- */
 public final class VoiceServerBridge {
+
+    private static final String TAG = "VoiceServerBridge";
 
     private final VoiceServerConfig config;
     private final PophieApiClient api;
     private final RealtimeSttClient realtimeStt;
+    private final MqttWakeClient mqttWake;
     private final Handler main = new Handler(Looper.getMainLooper());
 
     private volatile VoiceServerListener listener;
@@ -36,7 +32,6 @@ public final class VoiceServerBridge {
     private volatile boolean logEnabled = true;
     private volatile GateMode gateMode = GateMode.REPORT;
     private volatile String sessionId = "";
-    /** 实时 STT 最新 partial / final（WebSocket 线程写入）。 */
     private volatile String pendingSttPartial = "";
     private volatile String pendingSttFinal = "";
     private volatile long pendingSttPatchLogId = 0;
@@ -47,27 +42,40 @@ public final class VoiceServerBridge {
 
     private final ReplyAudioPlayer replyPlayer = new ReplyAudioPlayer();
     private final ReplyNotifyClient replyNotify = new ReplyNotifyClient();
-    /** 串行 chat/stream，避免多段并行时 reply 事件交错。 */
     private final ExecutorService chatExecutor = Executors.newSingleThreadExecutor();
-    /** 串行段日志上传 + STT patch，避免每段创建线程。 */
     private final ExecutorService logExecutor = Executors.newSingleThreadExecutor();
-    /** 串行测试推送，避免连点重叠。 */
     private final ExecutorService notifyTestExecutor = Executors.newSingleThreadExecutor();
+    private final ExecutorService mqttPullExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "mqtt-pull");
+        t.setDaemon(true);
+        return t;
+    });
     private final AtomicInteger pendingTestPushes = new AtomicInteger(0);
     private static final int MAX_PENDING_TEST_PUSHES = 3;
 
-    /** sessionId 创建锁（双重检查，避免并发 newSession）。 */
     private final Object sessionLock = new Object();
-    /** VoiceEngine 弱引用，用于 TTS 播放时静音采集。 */
     private volatile VoiceEngine engineRef;
-    /** 正在播放的 TTS 段计数，归零时才解除静音。 */
     private final AtomicInteger playbackCount = new AtomicInteger(0);
+
+    private final Object mqttPullLock = new Object();
+    private final AtomicInteger mqttPullInFlight = new AtomicInteger(0);
+    private final AtomicBoolean mqttPullPending = new AtomicBoolean(false);
+    private volatile boolean mqttMode = false;
+    private volatile String currentMqttBroker = "";
+    private volatile String currentMqttUsername = "";
+    private volatile String currentMqttPassword = "";
 
     public VoiceServerBridge(VoiceServerConfig config) {
         this.config = config;
         this.api = new PophieApiClient(config);
         this.realtimeStt = new RealtimeSttClient();
+        this.mqttWake = new MqttWakeClient();
         this.logEnabled = config.logEnabled;
+        this.mqttMode = config.mqttBroker != null && !config.mqttBroker.trim().isEmpty();
+        this.currentMqttBroker = config.mqttBroker == null ? "" : config.mqttBroker.trim();
+        this.currentMqttUsername = config.mqttUsername == null ? "" : config.mqttUsername;
+        this.currentMqttPassword = config.mqttPassword == null ? "" : config.mqttPassword;
+
         replyPlayer.setListener(new ReplyAudioPlayer.Listener() {
             @Override
             public void onPlayStart(int seq, String text) {
@@ -92,6 +100,42 @@ public final class VoiceServerBridge {
                 });
             }
         });
+
+        mqttWake.setListener(new MqttWakeClient.WakeListener() {
+            @Override
+            public void onMqttConnected() {
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onMqttStatus(true, null);
+                });
+            }
+
+            @Override
+            public void onMqttDisconnected(String reason) {
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onMqttStatus(false, reason);
+                });
+            }
+
+            @Override
+            public void onMqttError(String message) {
+                main.post(() -> {
+                    VoiceServerListener l = listener;
+                    if (l != null) l.onMqttStatus(false, message);
+                });
+            }
+
+            @Override
+            public void onWake(String robotId, String userId, int msgCount) {
+                triggerMqttPull();
+            }
+        });
+
+        if (mqttMode) {
+            mqttWake.configure(config.mqttBroker, config.robotId, config.userId,
+                    config.mqttUsername, config.mqttPassword);
+        }
     }
 
     public void setListener(VoiceServerListener listener) {
@@ -104,6 +148,42 @@ public final class VoiceServerBridge {
 
     public String getBaseUrl() {
         return api.getBaseUrl();
+    }
+
+    /**
+     * 动态更新MQTT Broker配置。如果broker为空则关闭MQTT切回长连接模式；
+     * 如果broker变化则断开旧连接重新连接。
+     */
+    public void updateMqttBroker(String brokerUrl, String username, String password) {
+        String b = brokerUrl == null ? "" : brokerUrl.trim();
+        String u = username == null ? "" : username;
+        String p = password == null ? "" : password;
+        boolean wasEnabled = mqttMode;
+        boolean nowEnabled = !b.isEmpty();
+        if (wasEnabled && !nowEnabled) {
+            mqttWake.stop();
+            mqttMode = false;
+            currentMqttBroker = "";
+            currentMqttUsername = "";
+            currentMqttPassword = "";
+            Log.i(TAG, "MQTT disabled, switching to long-connect mode");
+            return;
+        }
+        if (!nowEnabled) return;
+        boolean brokerChanged = !b.equals(currentMqttBroker) || !u.equals(currentMqttUsername) || !p.equals(currentMqttPassword);
+        currentMqttBroker = b;
+        currentMqttUsername = u;
+        currentMqttPassword = p;
+        mqttMode = true;
+        mqttWake.configure(b, api.getRobotId(), api.getUserId(), u, p);
+        if (brokerChanged && wasEnabled) {
+            mqttWake.stop();
+        }
+        String rid = api.getRobotId();
+        String uid = api.getUserId();
+        if (rid != null && !rid.isEmpty() && !"default".equals(rid)) {
+            mqttWake.start();
+        }
     }
 
     public void setSessionId(String id) {
@@ -130,18 +210,18 @@ public final class VoiceServerBridge {
         gateMode = mode == null ? GateMode.REPORT : mode;
     }
 
-    /**
-     * 绑定 VoiceEngine，用于 TTS 播放时自动静音采集（抑制自激）。
-     * 在 engine.start() 之前调用。
-     */
+    public boolean isMqttEnabled() {
+        return mqttMode;
+    }
+
+    public boolean isMqttConnected() {
+        return mqttWake.isConnected();
+    }
+
     public void setVoiceEngine(VoiceEngine engine) {
         this.engineRef = engine;
     }
 
-    /**
-     * 确保 sessionId 存在（双重检查锁，避免并发创建多个会话）。
-     * 网络调用在锁内，但仅在首次（sessionId 为空时）触发。
-     */
     private String ensureSession() throws IOException {
         if (!sessionId.isEmpty()) return sessionId;
         synchronized (sessionLock) {
@@ -152,19 +232,21 @@ public final class VoiceServerBridge {
         }
     }
 
-    /** 释放全部资源（线程池、WebSocket、播放器）。调用后不可再用。 */
     public void shutdown() {
         disconnect();
         chatExecutor.shutdownNow();
         logExecutor.shutdownNow();
         notifyTestExecutor.shutdownNow();
+        mqttPullExecutor.shutdownNow();
+        mqttWake.stop();
     }
 
-    /** 建立实时 STT WebSocket；若开启则同时订阅回复通知。 */
     public void connectRealtime() {
         if (!realtimeEnabled) return;
         postSttConnecting();
-        connectReplyNotify();
+        if (!mqttMode) {
+            connectReplyNotify();
+        }
         realtimeStt.connect(api.getBaseUrl(), new RealtimeSttClient.Listener() {
             @Override
             public void onConnected() {
@@ -237,7 +319,6 @@ public final class VoiceServerBridge {
         pendingSttPatchLogId = 0;
     }
 
-    /** 仅绑定设备（获取 user_id / robot_id），不建会话。 */
     public void bindDevice() {
         new Thread(() -> {
             try {
@@ -245,7 +326,14 @@ public final class VoiceServerBridge {
                     throw new IOException("device_id 未配置");
                 }
                 PophieApiClient.BindInfo info = api.bindDevice();
-                connectReplyNotify();
+                if (mqttMode) {
+                    mqttWake.configure(currentMqttBroker, info.robotId, info.userId,
+                            currentMqttUsername, currentMqttPassword);
+                    mqttWake.updateRobotUser(info.robotId, info.userId);
+                    mqttWake.start();
+                } else {
+                    connectReplyNotify();
+                }
                 main.post(() -> {
                     VoiceServerListener l = listener;
                     if (l != null) l.onDeviceBound(info, null);
@@ -344,7 +432,6 @@ public final class VoiceServerBridge {
         void onError(String error);
     }
 
-    /** 后台线程：健康检查 + 新建会话。 */
     public void testConnection() {
         new Thread(() -> {
             try {
@@ -354,13 +441,20 @@ public final class VoiceServerBridge {
                 }
                 PophieApiClient.SessionInfo session = api.newSession();
                 sessionId = session.sessionId;
+                if (mqttMode) {
+                    mqttWake.configure(currentMqttBroker, session.robotId, session.userId,
+                            currentMqttUsername, currentMqttPassword);
+                    mqttWake.updateRobotUser(session.robotId, session.userId);
+                    mqttWake.start();
+                } else {
+                    connectReplyNotify();
+                }
                 main.post(() -> {
                     VoiceServerListener l = listener;
                     if (l != null) {
                         l.onConnectionTested(health.speechEnabled, session.sessionId, null);
                     }
                 });
-                connectReplyNotify();
             } catch (Exception e) {
                 main.post(() -> {
                     VoiceServerListener l = listener;
@@ -372,10 +466,6 @@ public final class VoiceServerBridge {
         }).start();
     }
 
-    /**
-     * 挂到 {@link com.pophie.voice.VoiceEngine#setListener}。
-     * 实时 STT 走 {@link VoiceListener#onAudioFrameSync}；声纹仍走原有回调。
-     */
     public VoiceListener createVoiceListener() {
         return new VoiceListener() {
             @Override
@@ -420,7 +510,6 @@ public final class VoiceServerBridge {
         };
     }
 
-    /** 近场 RMS 是否达标（供 UI 显示电平）。 */
     public boolean isNearField(double rms) {
         return rms >= config.nearFieldMinRms;
     }
@@ -462,9 +551,6 @@ public final class VoiceServerBridge {
         });
     }
 
-    /**
-     * 段结束往往早于 WebSocket final，短暂等待 final；超时则用 partial 兜底。
-     */
     private String resolveSttTextForUpload() {
         if (!realtimeEnabled) {
             return takeSttText();
@@ -502,16 +588,67 @@ public final class VoiceServerBridge {
         pendingSttPartial = "";
     }
 
-    /** 订阅 /api/reply/notify（已连接则复用，避免连点断开）。 */
     public void connectReplyNotify() {
         if (!config.replyNotifyEnabled) return;
-        ensureReplyNotifyConnected(5_000);
+        if (mqttMode) return;
+        ensureReplyNotifyConnected(ReplyNotifyClient.Mode.LONG_NOTIFY, 5_000);
     }
 
-    private boolean ensureReplyNotifyConnected(long readyTimeoutMs) {
+    private void triggerMqttPull() {
+        synchronized (mqttPullLock) {
+            if (mqttPullInFlight.get() > 0) {
+                mqttPullPending.set(true);
+                Log.d(TAG, "mqtt pull already in flight, mark pending");
+                return;
+            }
+            mqttPullInFlight.set(1);
+        }
+        mqttPullExecutor.execute(this::runPullLoop);
+    }
+
+    private void runPullLoop() {
+        boolean more;
+        do {
+            mqttPullPending.set(false);
+            more = false;
+            boolean connected = false;
+            try {
+                Log.i(TAG, "mqtt wake: connecting pull websocket");
+                connected = ensureReplyNotifyConnected(ReplyNotifyClient.Mode.PULL, 8_000);
+                if (!connected) {
+                    Log.w(TAG, "mqtt pull connect failed");
+                } else {
+                    long deadline = System.currentTimeMillis() + 30_000;
+                    while (!replyNotify.isPullComplete() && System.currentTimeMillis() < deadline) {
+                        try {
+                            Thread.sleep(200);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            break;
+                        }
+                    }
+                    Log.i(TAG, "mqtt pull complete, closing");
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "mqtt pull error: " + e.getMessage());
+            } finally {
+                replyNotify.close();
+            }
+            synchronized (mqttPullLock) {
+                more = mqttPullPending.get();
+                if (more) {
+                    mqttPullPending.set(false);
+                } else {
+                    mqttPullInFlight.set(0);
+                }
+            }
+        } while (more);
+    }
+
+    private boolean ensureReplyNotifyConnected(ReplyNotifyClient.Mode mode, long readyTimeoutMs) {
         return replyNotify.connectIfNeeded(
                 api.getBaseUrl(), api.getRobotId(), api.getUserId(), sessionId,
-                createReplyNotifyHandler(), readyTimeoutMs);
+                mode, createReplyNotifyHandler(), readyTimeoutMs);
     }
 
     private ReplyNotifyClient.EventHandler createReplyNotifyHandler() {
@@ -569,7 +706,6 @@ public final class VoiceServerBridge {
             @Override
             public void onSpeak(String text, int seq) {
                 streamReply.append(text);
-                // 展示走 onReply(phase=speak)；此处仅累积完整回复供 onChatComplete 兜底
             }
 
             @Override
@@ -641,7 +777,6 @@ public final class VoiceServerBridge {
 
     private int testPushCounter;
 
-    /** 联调：请求服务端推送测试回复（需 notify WebSocket 已 ready）。 */
     public void testReplyPush() {
         if (pendingTestPushes.incrementAndGet() > MAX_PENDING_TEST_PUSHES) {
             pendingTestPushes.decrementAndGet();
@@ -656,15 +791,56 @@ public final class VoiceServerBridge {
         }
         notifyTestExecutor.execute(() -> {
             try {
-                if (!ensureReplyNotifyConnected(8_000)) {
-                    throw new IOException("reply/notify 未连接，请先点「测连接」或稍候再试");
+                if (mqttMode) {
+                    synchronized (mqttPullLock) {
+                        if (mqttPullInFlight.get() > 0) {
+                            throw new IOException("正在拉取消息，请稍候再试");
+                        }
+                        mqttPullInFlight.set(1);
+                    }
+                    try {
+                        boolean ok = ensureReplyNotifyConnected(ReplyNotifyClient.Mode.PULL, 5_000);
+                        if (!ok) {
+                            throw new IOException("pull连接失败，请检查MQTT和网络");
+                        }
+                        int n = ++testPushCounter;
+                        api.testReplyPush("测试语音 " + n);
+                        main.post(() -> {
+                            VoiceServerListener l = listener;
+                            if (l != null) l.onReplyNotify("test_sent", "已请求测试推送 #" + n, "test");
+                        });
+                        long deadline = System.currentTimeMillis() + 15_000;
+                        while (!replyNotify.isPullComplete() && System.currentTimeMillis() < deadline) {
+                            try { Thread.sleep(200); } catch (InterruptedException e) {
+                                Thread.currentThread().interrupt(); break;
+                            }
+                        }
+                    } finally {
+                        replyNotify.close();
+                        boolean retrigger;
+                        synchronized (mqttPullLock) {
+                            retrigger = mqttPullPending.get();
+                            if (retrigger) {
+                                mqttPullPending.set(false);
+                            } else {
+                                mqttPullInFlight.set(0);
+                            }
+                        }
+                        if (retrigger) {
+                            mqttPullExecutor.execute(this::runPullLoop);
+                        }
+                    }
+                } else {
+                    if (!ensureReplyNotifyConnected(ReplyNotifyClient.Mode.LONG_NOTIFY, 8_000)) {
+                        throw new IOException("reply/notify 未连接，请先点「测连接」或稍候再试");
+                    }
+                    int n = ++testPushCounter;
+                    api.testReplyPush("测试语音 " + n);
+                    main.post(() -> {
+                        VoiceServerListener l = listener;
+                        if (l != null) l.onReplyNotify("test_sent", "已请求测试推送 #" + n, "test");
+                    });
                 }
-                int n = ++testPushCounter;
-                api.testReplyPush("测试语音 " + n);
-                main.post(() -> {
-                    VoiceServerListener l = listener;
-                    if (l != null) l.onReplyNotify("test_sent", "已请求测试推送 #" + n, "test");
-                });
             } catch (Exception e) {
                 replyPlayer.recover();
                 main.post(() -> {

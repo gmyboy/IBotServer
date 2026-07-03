@@ -31,6 +31,12 @@ public final class VoiceServerConfig {
     public final boolean serverReplyTts;
     /** 是否订阅 /api/reply/notify（主动发言/提醒）。 */
     public final boolean replyNotifyEnabled;
+    /** MQTT broker地址，如tcp://192.168.1.100:1883，为空则不启用MQTT */
+    public final String mqttBroker;
+    /** MQTT用户名 */
+    public final String mqttUsername;
+    /** MQTT密码 */
+    public final String mqttPassword;
 
     private VoiceServerConfig(Builder b) {
         this.baseUrl = b.baseUrl;
@@ -48,6 +54,9 @@ public final class VoiceServerConfig {
         this.sttUploadWaitMs = b.sttUploadWaitMs;
         this.serverReplyTts = b.serverReplyTts;
         this.replyNotifyEnabled = b.replyNotifyEnabled;
+        this.mqttBroker = b.mqttBroker;
+        this.mqttUsername = b.mqttUsername;
+        this.mqttPassword = b.mqttPassword;
     }
 
     public static final class Builder {
@@ -66,6 +75,9 @@ public final class VoiceServerConfig {
         private long sttUploadWaitMs = 1500;
         private boolean serverReplyTts = true;
         private boolean replyNotifyEnabled = true;
+        private String mqttBroker = "";
+        private String mqttUsername = "";
+        private String mqttPassword = "";
 
         public Builder baseUrl(String v) { this.baseUrl = v; return this; }
         public Builder robotId(String v) { this.robotId = v; return this; }
@@ -82,6 +94,9 @@ public final class VoiceServerConfig {
         public Builder sttUploadWaitMs(long v) { this.sttUploadWaitMs = v; return this; }
         public Builder serverReplyTts(boolean v) { this.serverReplyTts = v; return this; }
         public Builder replyNotifyEnabled(boolean v) { this.replyNotifyEnabled = v; return this; }
+        public Builder mqttBroker(String v) { this.mqttBroker = v == null ? "" : v; return this; }
+        public Builder mqttUsername(String v) { this.mqttUsername = v == null ? "" : v; return this; }
+        public Builder mqttPassword(String v) { this.mqttPassword = v == null ? "" : v; return this; }
 
         public VoiceServerConfig build() { return new VoiceServerConfig(this); }
     }

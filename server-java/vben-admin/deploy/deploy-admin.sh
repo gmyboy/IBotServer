@@ -56,9 +56,17 @@ ok()   { echo -e "\033[32m[OK]\033[0m    $*"; }
 warn() { echo -e "\033[33m[WARN]\033[0m  $*"; }
 die()  { echo -e "\033[31m[ERROR]\033[0m $*" >&2; exit 1; }
 
+if command -v python3 >/dev/null 2>&1; then
+  PYTHON=python3
+elif command -v python >/dev/null 2>&1; then
+  PYTHON=python
+else
+  PYTHON=""
+fi
+
 # ----------------------------- 0. 前置依赖检查 -------------------------------
 log "检查本地依赖 ..."
-command -v python >/dev/null 2>&1 || command -v python3 >/dev/null 2>&1 || die "未找到 python/python3（打包 dist 需要）"
+[[ -n "$PYTHON" ]] || die "未找到 python3/python（打包 dist 需要）"
 command -v ssh >/dev/null 2>&1 || die "未找到 ssh"
 command -v scp >/dev/null 2>&1 || die "未找到 scp"
 [[ -f "$NGINX_CONF" ]]   || die "缺少 $NGINX_CONF"
@@ -79,12 +87,13 @@ fi
 [[ -f "$DIST_DIR/index.html" ]] || die "未找到前端构建产物：$DIST_DIR/index.html（加 --build 先构建）"
 
 # 找到运行时配置文件 _app-config-*.js 并把接口地址改成 $API_URL
-APP_CONFIG="$(find "$DIST_DIR" -maxdepth 1 -name '_app-config-*.js' | head -1)"
+APP_CONFIG=""
+APP_CONFIG="$(find "$DIST_DIR" -maxdepth 1 -name '_app-config-*.js' 2>/dev/null | head -1 || true)"
 if [[ -n "$APP_CONFIG" ]]; then
-  log "注入运行时 API 地址 → $API_URL （$APP_CONFIG）"
+  log "注入运行时 API 地址 -> $API_URL ($APP_CONFIG)"
   # 注意：不能用 argv 传 $API_URL，Git Bash(MSYS2) 会把 /api 这种 POSIX 路径
   # 自动转成 Windows 路径(如 C:/Program Files/Git/api)。改用环境变量规避。
-  APP_CONFIG_PATH="$APP_CONFIG" APP_API_URL="$API_URL" python <<'PY'
+  APP_CONFIG_PATH="$APP_CONFIG" APP_API_URL="$API_URL" "$PYTHON" <<'PY'
 import os, re
 path = os.environ['APP_CONFIG_PATH']
 url  = os.environ['APP_API_URL']
@@ -107,7 +116,7 @@ fi
 ZIP_FILE="$WORK_DIR/admin-dist.zip"
 log "打包 dist → $(basename "$ZIP_FILE") ..."
 # 用环境变量传路径，避免 Git Bash(MSYS2) 把 /d/... 等 POSIX 路径转换导致 Python 找不到文件
-PACK_SRC="$DIST_DIR" PACK_OUT="$ZIP_FILE" python <<'PY'
+PACK_SRC="$DIST_DIR" PACK_OUT="$ZIP_FILE" "$PYTHON" <<'PY'
 import os, zipfile
 src = os.environ['PACK_SRC']
 out = os.environ['PACK_OUT']

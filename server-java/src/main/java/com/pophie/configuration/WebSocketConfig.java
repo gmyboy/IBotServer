@@ -26,7 +26,8 @@ public class WebSocketConfig implements WebSocketConfigurer {
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
         registry.addHandler(sttStreamWebSocketHandler, "/api/stt/stream")
                 .setAllowedOrigins("*");
-        registry.addHandler(replyNotifyWebSocketHandler, "/api/reply/notify")
+
+        registry.addHandler(replyNotifyWebSocketHandler, "/api/reply/notify", "/api/reply/pull")
                 .setAllowedOrigins("*");
     }
 

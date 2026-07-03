@@ -164,6 +164,14 @@ public class UserService {
             m.put("created_at", u.getCreatedAt());
             m.put("last_seen_at", u.getUpdatedAt());
             m.put("devices_count", deviceRepo.countByUserId(u.getUserId()));
+            List<DeviceEntity> devs = deviceRepo.findByUserIdOrderByBoundAtAsc(u.getUserId());
+            List<String> robotIds = new ArrayList<>();
+            for (DeviceEntity d : devs) {
+                if (d.getRobotId() != null && !robotIds.contains(d.getRobotId())) {
+                    robotIds.add(d.getRobotId());
+                }
+            }
+            m.put("robot_ids", robotIds);
             out.add(m);
         }
         return out;

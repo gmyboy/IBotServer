@@ -9,6 +9,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      mqtt:
+        condition: service_healthy
     environment:
       SPRING_PROFILES_ACTIVE: prod
       SPRING_DATASOURCE_URL: jdbc:mysql://mysql:3306/${DB_NAME}?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
@@ -23,8 +25,11 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
       ADMIN_TOKEN: ${ADMIN_TOKEN:-}
+      MQTT_BROKER: tcp://mqtt:1883
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
     ports:
-      - "9900:8000"
+      - "${APP_HOST_PORT:-9900}:8000"
     volumes:
       - ./logs:/app/logs
       - ./config.yaml:/app/config.yaml
@@ -69,9 +74,36 @@ services:
     networks:
       - pophie-net
 
+  mqtt:
+    image: emqx/emqx:5.8
+    container_name: pophie-mqtt
+    restart: unless-stopped
+    environment:
+      EMQX_ALLOW_ANONYMOUS: "true"
+      EMQX_LISTENERS__TCP__DEFAULT__BIND: "0.0.0.0:1883"
+      EMQX_LISTENERS__WS__DEFAULT__BIND: "0.0.0.0:8083"
+      EMQX_DASHBOARD__DEFAULT_USERNAME: ${MQTT_DASHBOARD_USER:-admin}
+      EMQX_DASHBOARD__DEFAULT_PASSWORD: ${MQTT_DASHBOARD_PASSWORD:-public}
+    ports:
+      - "${MQTT_HOST_PORT:-1883}:1883"
+      - "${MQTT_WS_PORT:-8083}:8083"
+      - "${MQTT_DASHBOARD_PORT:-18083}:18083"
+    volumes:
+      - mqtt-data:/opt/emqx/data
+      - mqtt-log:/opt/emqx/log
+    healthcheck:
+      test: ["CMD", "/opt/emqx/bin/emqx", "ctl", "status"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+    networks:
+      - pophie-net
+
 volumes:
   mysql-data: {}
   redis-data: {}
+  mqtt-data: {}
+  mqtt-log: {}
 
 networks:
   pophie-net: {}

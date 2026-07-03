@@ -42,4 +42,7 @@ public interface VoiceServerListener {
     default void onSegmentLogged(long logId, boolean isOwner, String sttText) {}
 
     default void onSegmentLogError(String message) {}
+
+    /** MQTT连接状态变化。connected=true时error为null；false时error为断开原因 */
+    default void onMqttStatus(boolean connected, String error) {}
 }

@@ -1,23 +1,26 @@
-# 本机 IDE 调试：连接 docker-compose.macos.yml 暴露的 MySQL/Redis。
-# 用法：
-#   1. cp application-local.properties.example application-local.properties
-#   2. 按 server-java/.env 填写下方占位符
-#   3. IntelliJ Run Configuration → Active profiles: dev,local
+# 本机 IDE 调试：连接 docker-compose 暴露的 MySQL/Redis。
 #
-# application-local.properties 已加入 .gitignore，勿提交真实密码。
+# 推荐（自动与 .env 一致，避免 Access denied）：
+#   bash deploy/sync-env-to-local-properties.sh
+#
+# 或手动：
+#   1. cp application-local.properties.example application-local.properties
+#   2. 按 server-java/.env 填写（用 DB_USER/DB_PASSWORD，勿用过期手抄密码）
+#   3. IntelliJ → Active profiles: dev,local
+#
+# application-local.properties 已加入 .gitignore。
 
-# 业务配置（与 macos-deploy 的 DATA_ROOT/config.yaml 一致）
+server.port=9901
+spring.application.name=pophie-server
 pophie.config-path=/path/to/PophieData/config.yaml
 
-# MySQL（宿主机端口见 .env 的 MYSQL_HOST_PORT，默认 9902）
+# MySQL：端口见 .env 的 MYSQL_HOST_PORT（macos 默认 9902；docker-compose.yml 默认 3306）
 spring.datasource.url=jdbc:mysql://127.0.0.1:9902/pophie?useUnicode=true&characterEncoding=UTF-8&useSSL=false&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true
-spring.datasource.username=root
-spring.datasource.password=<DB_ROOT_PASSWORD>
+spring.datasource.username=pophie_user
+spring.datasource.password=<DB_PASSWORD>
 
-# Redis（宿主机端口见 .env 的 REDIS_HOST_PORT，默认 9903）
 spring.data.redis.host=127.0.0.1
 spring.data.redis.port=9903
 spring.data.redis.password=<REDIS_PASSWORD>
 
-# 与 Docker 部署保持一致
 app.crypto.aes-key=<AES_KEY>
