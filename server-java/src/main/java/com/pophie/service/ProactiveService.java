@@ -23,22 +23,6 @@ public class ProactiveService {
 
     private static final Logger log = LoggerFactory.getLogger("pophie.proactive");
 
-    static final String PROACTIVE_SYSTEM = """
-你是 Pophie 桌面陪伴机器人的"主动交互决策器"。
-基于被动感知信号 + 长期记忆，决定是否在此刻主动开口。
-原则：
-- 用户专注/在多人对话/明显不希望被打扰 → 静默(silent)
-- 检测到疲惫/低落/独处 + 长期偏好支持 → 主动陪伴(speak)
-- 重要日期/事件临近 → 主动关怀(speak)
-- 没有合适契机 → 静默
-仅返回 JSON：
-{
-  "decision": "speak" | "silent",
-  "reason": "为什么这样决定",
-  "content": "若 speak，机器人要对用户亲口说的话（直接对话，禁止写分析/推理）；否则空字符串",
-  "used_memory_ids": [引用到的记忆 id 列表]
-}""";
-
     private final LlmService llm;
     private final MemoryService memory;
     private final ConversationRepository conversationRepo;
@@ -63,7 +47,7 @@ public class ProactiveService {
         String memText = memory.formatMemoriesForPrompt(mems);
 
         List<Map<String, Object>> msgs = new ArrayList<>();
-        msgs.add(Map.of("role", "system", "content", PROACTIVE_SYSTEM));
+        msgs.add(Map.of("role", "system", "content", PromptConstants.PROACTIVE_SYSTEM));
         msgs.add(Map.of("role", "user", "content",
                 "被动感知信号：" + JsonUtil.dumps(signal) + "\n\n可用长期记忆：\n" + memText + "\n\n请决策。"));
 

@@ -25,31 +25,6 @@ public class MemoryService {
 
     private static final Logger log = LoggerFactory.getLogger("pophie.memory");
 
-    static final String EXTRACT_SYSTEM = """
-你是 Pophie 陪伴机器人的"记忆抽取器"。
-对用户最新一句话做记忆候选抽取。仅返回 JSON，结构为：
-{
-  "candidates": [
-    {
-      "summary": "一句话摘要（中文，第三人称）",
-      "content": "可被长期复用的结构化记忆内容",
-      "tags": ["标签1","标签2"],
-      "emotion_score": -1~1 之间的情感效价,
-      "importance": 0~1 之间的重要度,
-      "category": "identity|preference|event|relation|habit|trivia|emotion"
-    }
-  ]
-}
-评分规则：
-- 身份/家庭成员/重要日期/价值观/明确边界 → importance >= 0.9（可直跃 L4）
-- 长期习惯/明确偏好/情感事件 → importance 0.55~0.85
-- 一次性闲聊/天气/客套 → importance < 0.4，可不返回
-情感效价（emotion_score）很重要，正负都要如实给：
-- 这是陪伴机器人，情绪浓度高的时刻（无论开心的高光还是难过的低谷）哪怕「事实重要性」不高，也务必返回，
-  并把 emotion_score 的绝对值打高（强烈情绪 |emotion_score| >= 0.85）。
-- 例如「我和对象分手了」「我升职了好开心」这类，importance 可以中等，但 emotion_score 要充分体现强度与正负。
-若无可沉淀信息，返回 {"candidates": []}。""";
-
     private final MemoryRepository repo;
     private final LlmService llm;
     private final RuntimeConfigService cfg;
@@ -177,7 +152,7 @@ public class MemoryService {
             ctx.append("[").append(m.get("role")).append("] ").append(m.get("content"));
         }
         List<Map<String, Object>> msgs = new ArrayList<>();
-        msgs.add(Map.of("role", "system", "content", EXTRACT_SYSTEM));
+        msgs.add(Map.of("role", "system", "content", PromptConstants.MEMORY_EXTRACT_SYSTEM));
         msgs.add(Map.of("role", "user",
                 "content", "最近上下文：\n" + ctx + "\n\n本轮用户输入：\n" + userText));
         try {

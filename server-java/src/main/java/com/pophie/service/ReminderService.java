@@ -33,39 +33,6 @@ public class ReminderService {
     private static final Logger log = LoggerFactory.getLogger("pophie.reminder");
     private static final String[] WEEKDAYS = {"一", "二", "三", "四", "五", "六", "日"};
 
-    static final String EXTRACT_SYSTEM = """
-你是 Pophie 的"提醒抽取器"。
-判断用户最新一句话中是否包含"要 Pophie 在某个时间点主动提醒/叫他/通知他"的意图。
-只抽取**明确的定时约定**，闲聊、模糊愿望（"以后想去旅游"）不算。
-
-返回 JSON：
-{
-  "reminders": [
-    {
-      "remind_at": "YYYY-MM-DDTHH:MM:SS",   // 必须是绝对本地时间
-      "content": "要提醒的事情，简短一句",
-      "note": "可选：用户的原话/补充语境"
-    }
-  ]
-}
-
-时间解析规则（参考下面给出的 now 字段做基准）：
-- "10 分钟后" / "半小时后" → now + 对应分钟
-- "今晚 9 点" / "晚上 8 点半" → 今天的对应时间（若已过则推到明天）
-- "明天 8 点" → 明天 08:00
-- "下午 3 点" → 今天 15:00（若已过则明天 15:00）
-- "5 月 1 日 9 点" → 当年对应日期
-- 模糊到只有日期没有时间 → 默认 09:00
-- 完全没法定到绝对时间（"以后"/"有空"）→ 不要抽取
-若没有定时提醒意图，返回 {"reminders": []}。""";
-
-    static final String FIRE_SYSTEM = """
-你是 Pophie——温暖的桌面陪伴机器人，现在到点要主动提醒用户一件事。
-要求：
-- 一两句话，自然、亲切、不审讯，不要复读"我提醒你..."这种机械口吻
-- 可结合长期记忆里的情境（如对方的习惯、近期状态）让提醒更贴心
-- 不需要返回 JSON，直接给出要说的话即可""";
-
     private final LlmService llm;
     private final MemoryService memory;
     private final ReminderRepository reminderRepo;
@@ -97,7 +64,7 @@ public class ReminderService {
         int weekdayIdx = now.getDayOfWeek().getValue() - 1;
 
         List<Map<String, Object>> msgs = new ArrayList<>();
-        msgs.add(Map.of("role", "system", "content", EXTRACT_SYSTEM));
+        msgs.add(Map.of("role", "system", "content", PromptConstants.REMINDER_EXTRACT_SYSTEM));
         msgs.add(Map.of("role", "user", "content",
                 "now = " + nowStr + " (星期" + WEEKDAYS[weekdayIdx] + ")\n\n用户最新一句：\n" + text));
 
@@ -200,7 +167,7 @@ public class ReminderService {
         String memText = memory.formatMemoriesForPrompt(mems);
         String noteOrSource = firstNonBlank(str(reminder.get("note")), str(reminder.get("source_text")), "—");
         List<Map<String, Object>> msgs = new ArrayList<>();
-        msgs.add(Map.of("role", "system", "content", FIRE_SYSTEM));
+        msgs.add(Map.of("role", "system", "content", PromptConstants.REMINDER_FIRE_SYSTEM));
         msgs.add(Map.of("role", "user", "content",
                 "约定时间：" + str(reminder.get("remind_at")) + "\n"
                         + "要提醒的事：" + str(reminder.get("content")) + "\n"
