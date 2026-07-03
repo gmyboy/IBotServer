@@ -198,19 +198,17 @@ public class ReplyNotifyService {
             return;
         }
         Object lock = pushLocks.computeIfAbsent(s.ws.getId(), k -> new Object());
-        synchronized (lock) {
-            if (!s.ws.isOpen()) {
-                unregister(s.ws);
-                return;
-            }
-            ReplyStreamEmitter emitter = new ReplyStreamEmitter(
-                    sessionId, true, new VoiceProsody(), null, speech, ttsExecutor, lock,
-                    line -> sendRaw(s.ws, line.trim()));
-            emitter.replyStart(source);
-            emitter.emitSpeak(text);
-            emitter.awaitPendingTts(120_000);
-            emitter.replyDone();
+        if (!s.ws.isOpen()) {
+            unregister(s.ws);
+            return;
         }
+        ReplyStreamEmitter emitter = new ReplyStreamEmitter(
+                sessionId, true, new VoiceProsody(), null, speech, ttsExecutor, lock,
+                line -> sendRaw(s.ws, line.trim()));
+        emitter.replyStart(source);
+        emitter.emitSpeak(text);
+        emitter.awaitPendingTts(120_000);
+        emitter.replyDone();
     }
 
     private void sendRaw(WebSocketSession ws, String json) {

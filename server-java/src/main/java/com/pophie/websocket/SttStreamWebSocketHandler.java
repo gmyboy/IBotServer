@@ -33,6 +33,7 @@ public class SttStreamWebSocketHandler extends TextWebSocketHandler {
 
     private final SpeechService speech;
     private final Map<String, SttRealtimeSession> sessions = new ConcurrentHashMap<>();
+    private final Map<String, Object> sendLocks = new ConcurrentHashMap<>();
 
     public SttStreamWebSocketHandler(SpeechService speech) {
         this.speech = speech;
@@ -45,6 +46,8 @@ public class SttStreamWebSocketHandler extends TextWebSocketHandler {
             closeQuietly(session);
             return;
         }
+        Object sendLock = new Object();
+        sendLocks.put(session.getId(), sendLock);
         SttRealtimeSession stt = new SttRealtimeSession(speech, json -> sendRaw(session, json));
         sessions.put(session.getId(), stt);
         log.info("[stt/ws] connected {}", session.getId());
@@ -84,6 +87,7 @@ public class SttStreamWebSocketHandler extends TextWebSocketHandler {
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         SttRealtimeSession stt = sessions.remove(session.getId());
+        sendLocks.remove(session.getId());
         if (stt != null) stt.close();
         log.info("[stt/ws] closed {} {}", session.getId(), status);
     }
@@ -92,6 +96,7 @@ public class SttStreamWebSocketHandler extends TextWebSocketHandler {
     public void handleTransportError(WebSocketSession session, Throwable exception) {
         log.warn("[stt/ws] transport error {}: {}", session.getId(), exception.getMessage());
         SttRealtimeSession stt = sessions.remove(session.getId());
+        sendLocks.remove(session.getId());
         if (stt != null) stt.close();
         closeQuietly(session);
     }
@@ -110,9 +115,13 @@ public class SttStreamWebSocketHandler extends TextWebSocketHandler {
 
     private void sendJson(WebSocketSession session, Map<String, Object> ignored, String json) {
         if (!session.isOpen()) return;
-        synchronized (session) {
+        Object lock = sendLocks.get(session.getId());
+        if (lock == null) return;
+        synchronized (lock) {
             try {
-                session.sendMessage(new TextMessage(json));
+                if (session.isOpen()) {
+                    session.sendMessage(new TextMessage(json));
+                }
             } catch (Exception e) {
                 log.warn("[stt/ws] send error: {}", e.getMessage());
             }

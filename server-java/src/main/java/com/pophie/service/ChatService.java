@@ -503,11 +503,7 @@ public class ChatService {
         String voiceId = chatInput.getVoiceId();
         Object emitLock = new Object();
         ReplyStreamEmitter replyEmitter = new ReplyStreamEmitter(
-                sessionId, serverTts, voice, voiceId, speech, ttsExecutor, emitLock, line -> {
-                    synchronized (emitLock) {
-                        emit.accept(line);
-                    }
-                });
+                sessionId, serverTts, voice, voiceId, speech, ttsExecutor, emitLock, emit);
         replyEmitter.replyStart("chat");
 
         StreamingReplyTextExtractor extractor = new StreamingReplyTextExtractor();
@@ -551,7 +547,7 @@ public class ChatService {
             Map<String, Object> done = new LinkedHashMap<>();
             done.put("type", "done");
             done.put("response", resp);
-            emit.accept(JsonUtil.dumps(done) + "\n");
+            replyEmitter.emitEvent(done);
         } catch (LlmException e) {
             log.error("[chat/stream] LLM 失败：{}", e.getMessage());
             ChatResponse resp = new ChatResponse();
@@ -560,16 +556,20 @@ public class ChatService {
             resp.setSessionId(sessionId);
             resp.setOutput(silentOutput());
             resp.setStt(prepared.stt);
+            replyEmitter.awaitPendingTts(5_000);
+            replyEmitter.replyDone();
             Map<String, Object> done = new LinkedHashMap<>();
             done.put("type", "done");
             done.put("response", resp);
-            emit.accept(JsonUtil.dumps(done) + "\n");
+            replyEmitter.emitEvent(done);
         } catch (Exception e) {
             log.error("[chat/stream] 失败：{}", e.getMessage());
+            replyEmitter.awaitPendingTts(5_000);
+            replyEmitter.replyDone();
             Map<String, Object> err = new LinkedHashMap<>();
             err.put("type", "error");
             err.put("message", e.getMessage());
-            emit.accept(JsonUtil.dumps(err) + "\n");
+            replyEmitter.emitEvent(err);
         }
     }
 
