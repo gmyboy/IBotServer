@@ -12,10 +12,6 @@ import org.springframework.web.socket.handler.TextWebSocketHandler;
 import java.net.URI;
 import java.util.Map;
 
-/**
- * WebSocket {@code /api/reply/notify}：服务端推送回复通知 + TTS 音频（不阻断用户说话）。
- * 连接参数：robot_id、user_id、session_id（可选）。
- */
 @Component
 public class ReplyNotifyWebSocketHandler extends TextWebSocketHandler {
 
@@ -40,13 +36,23 @@ public class ReplyNotifyWebSocketHandler extends TextWebSocketHandler {
 
     @Override
     protected void handleTextMessage(WebSocketSession session, TextMessage message) {
-        // 客户端可发 ping；暂无其他上行协议
     }
 
     @Override
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         notifyService.unregister(session);
         log.info("[reply/ws] closed {}", status);
+    }
+
+    @Override
+    public void handleTransportError(WebSocketSession session, Throwable exception) {
+        log.warn("[reply/ws] transport error: {}", exception.getMessage());
+        notifyService.unregister(session);
+        try {
+            if (session.isOpen()) {
+                session.close(CloseStatus.SERVER_ERROR);
+            }
+        } catch (Exception ignored) {}
     }
 
     private static Map<String, String> parseQuery(URI uri) {

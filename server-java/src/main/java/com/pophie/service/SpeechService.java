@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -49,8 +50,8 @@ public class SpeechService {
 
     private static final Logger log = LoggerFactory.getLogger("pophie.speech");
 
-    /** CosyVoice WebSocket 不宜并发，与 Python _tts_lock 对齐。 */
-    private final Object ttsLock = new Object();
+    /** CosyVoice WebSocket 并发限制，使用信号量控制并发数而非全局串行。 */
+    private final Semaphore ttsSemaphore = new Semaphore(2, true);
 
     public static final String DASHSCOPE_TTS_WS_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
     /** Qwen3-ASR-Realtime WebSocket（与 TTS 的 /inference 端点不同） */
@@ -400,19 +401,27 @@ public class SpeechService {
         for (int attempt = 0; attempt < maxRetries; attempt++) {
             try {
                 long first;
-                synchronized (ttsLock) {
+                ttsSemaphore.acquire();
+                try {
                     first = doTtsCall(apiKey, model, timbre, audioFormat, rp[0], rp[1],
                             instruction, text, onChunk, waits);
+                } finally {
+                    ttsSemaphore.release();
                 }
                 if (metrics != null) metrics.put("first_packet_ms", first);
                 log.info("[speech] TTS ws ok voice_id={} len={} model={} fmt={}",
                         vid, text.length(), model, outputFormat);
                 return;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException("TTS interrupted", e);
             } catch (Exception e) {
                 lastErr = new RuntimeException(e.getMessage(), e);
                 log.warn("[speech] TTS ws 失败 attempt={}/{}: {}", attempt + 1, maxRetries, e.getMessage());
                 if (attempt + 1 < maxRetries) {
-                    try { Thread.sleep((long) (retryDelay * 1000)); } catch (InterruptedException ignored) {}
+                    try { Thread.sleep((long) (retryDelay * 1000)); } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                    }
                 }
             }
         }

@@ -85,12 +85,14 @@ public class ChatService {
     private final RobotService robotService;
     private final ConversationRepository conversationRepo;
     private final Executor bgExecutor;
+    private final Executor ttsExecutor;
     private final DeviceBindService deviceBind;
 
     public ChatService(RuntimeConfigService cfg, LlmService llm, MemoryService memory,
                        ReminderService reminder, SpeechService speech, RobotService robotService,
                        ConversationRepository conversationRepo, DeviceBindService deviceBind,
-                       @Qualifier("dbExecutor") Executor bgExecutor) {
+                       @Qualifier("dbExecutor") Executor bgExecutor,
+                       @Qualifier("ttsExecutor") Executor ttsExecutor) {
         this.cfg = cfg;
         this.llm = llm;
         this.memory = memory;
@@ -100,6 +102,7 @@ public class ChatService {
         this.conversationRepo = conversationRepo;
         this.deviceBind = deviceBind;
         this.bgExecutor = bgExecutor;
+        this.ttsExecutor = ttsExecutor;
     }
 
     // ---------- 解析辅助 ----------
@@ -540,7 +543,7 @@ public class ChatService {
         String voiceId = chatInput.getVoiceId();
         Object emitLock = new Object();
         ReplyStreamEmitter replyEmitter = new ReplyStreamEmitter(
-                sessionId, serverTts, voice, voiceId, speech, bgExecutor, emitLock, line -> {
+                sessionId, serverTts, voice, voiceId, speech, ttsExecutor, emitLock, line -> {
                     synchronized (emitLock) {
                         emit.accept(line);
                     }

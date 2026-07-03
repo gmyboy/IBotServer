@@ -134,6 +134,22 @@ public final class Schemas {
         return v != null ? v : k;
     }
 
+    // ---------- 姿态（预留，当前版本固定返回 null） ----------
+
+    public static final Map<String, String> POSTURE_LABELS = new LinkedHashMap<>();
+    static {
+    }
+
+    public static String postureLabel(String key) {
+        if (key == null) return null;
+        String k = key.trim();
+        if (k.isEmpty()) return null;
+        String v = POSTURE_LABELS.get(k);
+        if (v != null) return v;
+        v = POSTURE_LABELS.get(k.toLowerCase());
+        return v != null ? v : k;
+    }
+
     // ---------- 内心独白检测 ----------
 
     private record Marker(Pattern pattern, int weight) {}

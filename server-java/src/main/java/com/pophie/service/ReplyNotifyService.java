@@ -12,21 +12,18 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 
+import java.util.ArrayList;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
-/**
- * 向已连接的客户端 WebSocket 推送「需要回复用户」通知 + 服务端 TTS 音频。
- * 用于主动发言、提醒等不经过 chat/stream HTTP 的场景。
- */
 @Service
 public class ReplyNotifyService {
 
@@ -37,37 +34,60 @@ public class ReplyNotifyService {
     private final RuntimeConfigService cfg;
     private final RobotService robotService;
     private final Executor bgExecutor;
-    private final List<NotifySession> sessions = new CopyOnWriteArrayList<>();
+    private final Executor ttsExecutor;
+    private final List<NotifySession> sessions = new ArrayList<>();
     private final ConcurrentHashMap<String, Object> pushLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ExecutorService> userPushExecutors = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, String> wsToUserKey = new ConcurrentHashMap<>();
 
     public ReplyNotifyService(SpeechService speech, ConversationRepository conversationRepo,
                               RuntimeConfigService cfg, RobotService robotService,
-                              @Qualifier("dbExecutor") Executor bgExecutor) {
+                              @Qualifier("dbExecutor") Executor bgExecutor,
+                              @Qualifier("ttsExecutor") Executor ttsExecutor) {
         this.speech = speech;
         this.conversationRepo = conversationRepo;
         this.cfg = cfg;
         this.robotService = robotService;
         this.bgExecutor = bgExecutor;
+        this.ttsExecutor = ttsExecutor;
     }
 
     public void register(WebSocketSession ws, String robotId, String userId, String sessionId) {
-        sessions.add(new NotifySession(ws, robotId, userId, sessionId));
+        String key = robotId + ":" + userId;
+        synchronized (sessions) {
+            sessions.add(new NotifySession(ws, robotId, userId, sessionId));
+        }
+        wsToUserKey.put(ws.getId(), key);
         log.info("[reply/ws] register robot={} user={} session={}", robotId, userId, sessionId);
     }
 
     public void unregister(WebSocketSession ws) {
-        sessions.removeIf(s -> s.ws.getId().equals(ws.getId()));
-        pushLocks.remove(ws.getId());
+        String wsId = ws.getId();
+        String userKey = wsToUserKey.remove(wsId);
+        synchronized (sessions) {
+            sessions.removeIf(s -> s.ws.getId().equals(wsId));
+        }
+        pushLocks.remove(wsId);
+        if (userKey != null) {
+            boolean stillHasSession;
+            synchronized (sessions) {
+                stillHasSession = sessions.stream().anyMatch(s -> (s.robotId + ":" + s.userId).equals(userKey));
+            }
+            if (!stillHasSession) {
+                ExecutorService ex = userPushExecutors.remove(userKey);
+                if (ex != null) {
+                    ex.shutdown();
+                    log.info("[reply/ws] shutdown push executor for user={}", userKey);
+                }
+            }
+        }
     }
 
-    /** 匹配 robot+user（session_id 为空则广播该用户所有连接）。 */
     public void notifyReply(String robotId, String userId, String sessionId,
                             String text, String source) {
         notifyReplyInternal(robotId, userId, sessionId, text, source, false);
     }
 
-    /** 联调：推送完成后再返回（供 /api/reply/test 使用）。 */
     public void notifyReplyAndWait(String robotId, String userId, String sessionId,
                                    String text, String source, long timeoutMs) {
         notifyReplyInternal(robotId, userId, sessionId, text, source, true, timeoutMs);
@@ -88,8 +108,14 @@ public class ReplyNotifyService {
             robotService.touchRobot(rid);
             saveReplyText(rid, uid, sid, text, source);
 
-            for (NotifySession s : sessions) {
-                if (!s.matches(rid, uid, sessionId)) continue;
+            List<NotifySession> targets;
+            synchronized (sessions) {
+                targets = new ArrayList<>();
+                for (NotifySession s : sessions) {
+                    if (s.matches(rid, uid, sessionId)) targets.add(s);
+                }
+            }
+            for (NotifySession s : targets) {
                 pushToSession(s, text, source, sid);
             }
         };
@@ -109,16 +135,17 @@ public class ReplyNotifyService {
         if (paramSid != null && !paramSid.isBlank()) {
             return ensureSession(paramSid);
         }
-        for (NotifySession s : sessions) {
-            if (s.robotId.equals(robotId) && s.userId.equals(userId)
-                    && s.sessionId != null && !s.sessionId.isBlank()) {
-                return ensureSession(s.sessionId);
+        synchronized (sessions) {
+            for (NotifySession s : sessions) {
+                if (s.robotId.equals(robotId) && s.userId.equals(userId)
+                        && s.sessionId != null && !s.sessionId.isBlank()) {
+                    return ensureSession(s.sessionId);
+                }
             }
         }
         return ensureSession(null);
     }
 
-    /** 仅落库回复文本（TTS 音频不落库），供管理后台对话列表查看。 */
     private void saveReplyText(String robotId, String userId, String sessionId,
                                String text, String source) {
         Map<String, Object> meta = new LinkedHashMap<>();
@@ -176,9 +203,8 @@ public class ReplyNotifyService {
                 unregister(s.ws);
                 return;
             }
-            Object emitLock = new Object();
             ReplyStreamEmitter emitter = new ReplyStreamEmitter(
-                    sessionId, true, new VoiceProsody(), null, speech, bgExecutor, emitLock,
+                    sessionId, true, new VoiceProsody(), null, speech, ttsExecutor, lock,
                     line -> sendRaw(s.ws, line.trim()));
             emitter.replyStart(source);
             emitter.emitSpeak(text);
@@ -202,8 +228,7 @@ public class ReplyNotifyService {
             if (!robotId.equals(rid) || !userId.equals(uid)) return false;
             if (sessionId == null || sessionId.isBlank()) return true;
             if (sid == null || sid.isBlank()) return true;
-            return sessionId.equals(sid) || this.sessionId == null || this.sessionId.isBlank()
-                    || this.sessionId.equals(sid);
+            return sessionId.equals(sid);
         }
     }
 }

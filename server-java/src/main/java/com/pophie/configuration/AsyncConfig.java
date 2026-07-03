@@ -17,22 +17,36 @@ public class AsyncConfig {
         executor.setMaxPoolSize(8);
         executor.setQueueCapacity(500);
         executor.setThreadNamePrefix("db-async-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         executor.initialize();
         return executor;
     }
 
     /**
      * 流式输出专用线程池：每个 SSE/NDJSON 流占用一个线程直到结束。
-     * corePoolSize=10 应对常规并发；maxPoolSize=50 应对峰值；
-     * CallerRunsPolicy 保证队列满时不丢请求（由 Tomcat 请求线程兜底执行）。
      */
     @Bean("streamExecutor")
     public Executor streamExecutor() {
         ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(10);
         executor.setMaxPoolSize(50);
-        executor.setQueueCapacity(100);
+        executor.setQueueCapacity(200);
         executor.setThreadNamePrefix("stream-");
+        executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
+        executor.initialize();
+        return executor;
+    }
+
+    /**
+     * TTS合成专用线程池：避免TTS长任务占用dbExecutor。
+     */
+    @Bean("ttsExecutor")
+    public Executor ttsExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(4);
+        executor.setMaxPoolSize(16);
+        executor.setQueueCapacity(100);
+        executor.setThreadNamePrefix("tts-");
         executor.setRejectedExecutionHandler(new ThreadPoolExecutor.CallerRunsPolicy());
         executor.initialize();
         return executor;
